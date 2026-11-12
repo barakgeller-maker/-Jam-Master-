@@ -216,7 +216,7 @@ registerProcessor('jm-rec',R);`;
 
     $app.innerHTML = `<div class="wrap">
       <div class="top"><button class="iconbtn" id="back">→</button><h1>${esc(jam.name)}</h1><button class="iconbtn" id="menu">⋯</button></div>
-      ${!score ? `<div class="warnbox">לג׳אם הזה אין עדיין תווים שהאפליקציה יודעת לקרוא, אז אפשר לנגן ולהקליט ולשמוע את המיקס, אבל בלי בדיקת טעויות. כדי לקבל בדיקה: ייצא MusicXML מ-MuseScore והוסף אותו דרך ⋯.</div>` :
+      ${!score ? `<div class="warnbox">לג׳אם הזה אין עדיין תווים שהאפליקציה יודעת לקרוא, אז אפשר לנגן, להקליט ולשמוע את המיקס, אבל בלי בדיקת טעויות. כדי לקבל בדיקה, הוסף את ה-PDF של התווים דרך ⋯.</div>` :
         !synced || jam.sync.verified === false ? `<div class="warnbox">${!synced ? 'השיר עוד לא מסונכרן לתווים.' : 'הסנכרון של השיר הזה עוד לא אומת, ולכן הבדיקה עלולה לטעות.'} <a href="#/sync/${encodeURIComponent(jam.id)}" style="color:var(--accent);font-weight:700">סנכרן עכשיו (דקה)</a></div>` : ''}
       <div class="card stage">
         <div class="sec" id="sec">&nbsp;</div>
@@ -478,14 +478,15 @@ registerProcessor('jm-rec',R);`;
   function jamMenu(jam) {
     sheet(`<h3>${esc(jam.name)}</h3>
       ${hasScore(jam) ? `<button class="btn" data-act="sync">🎚️ סנכרון השיר לתווים</button>` : ''}
-      ${!jam.demo ? `<button class="btn" data-act="xml">📄 ${hasScore(jam) ? 'החלף' : 'הוסף'} קובץ MusicXML</button>` : ''}
+      ${!jam.demo ? `<button class="btn" data-act="xml">📄 ${hasScore(jam) ? 'החלף' : 'הוסף'} תווים (PDF)</button>` : ''}
       ${!jam.demo ? `<button class="btn ghost" data-act="del" style="color:var(--bad)">מחק את הג׳אם</button>` : ''}
       <button class="btn ghost" data-close>סגור</button>`, async act => {
       if (act === 'sync') go('#/sync/' + encodeURIComponent(jam.id));
       if (act === 'del') sheet(`<h3>למחוק את "${esc(jam.name)}"?</h3><div class="sub">כל ההקלטות של הג׳אם יימחקו מהטלפון.</div><button class="btn rec" data-act="yes">מחק</button><button class="btn ghost" data-close>ביטול</button>`, async a => { if (a !== 'yes') return; await DB.del('jams', jam.id); await DB.del('blobs', 'audio:' + jam.id); for (const t of await DB.takesFor(jam.id)) await DB.del('takes', t.id); go(''); });
-      if (act === 'xml') pickFile('.musicxml,.xml,.mxl', async f => {
+      if (act === 'xml') pickFile('application/pdf,.pdf,.musicxml,.xml,.mxl', async f => {
+        toast('קורא את התווים…', 1500);
         try { const sc = await readScoreFile(f, jam.instrument); jam.score = sc; jam.sync = null; await DB.put('jams', jam); toast('התווים נטענו: ' + sc.notes.length + ' תווים'); go('#/sync/' + encodeURIComponent(jam.id)); }
-        catch (e) { toast('לא הצלחתי לקרוא את הקובץ'); }
+        catch (e) { toast(e.message === 'noNotes' ? 'לא מצאתי תווים בקובץ. אם זו סריקה או צילום, עדיין אין לי איך לקרוא אותו.' : 'לא הצלחתי לקרוא את הקובץ', 4000); }
       });
     });
   }
@@ -507,8 +508,28 @@ registerProcessor('jm-rec',R);`;
     i.onchange = () => { if (i.files && i.files.length) cb(opts && opts.multiple ? [...i.files] : i.files[0]); };
     i.click();
   }
+  let pdfLibP = null;
+  function loadPdfJs() {
+    if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+    if (!pdfLibP) pdfLibP = new Promise((res, rej) => {
+      const sc = document.createElement('script'); sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+      sc.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; res(window.pdfjsLib); };
+      sc.onerror = () => { pdfLibP = null; rej(new Error('pdflib')); }; document.head.appendChild(sc);
+    });
+    return pdfLibP;
+  }
+  const isPdf = f => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name);
   async function readScoreFile(f, instrumentId) {
     const inst = M.instrument(instrumentId);
+    if (isPdf(f)) {
+      const lib = await loadPdfJs();
+      const r = await window.OMR.readPdf(lib, new Uint8Array(await f.arrayBuffer()));
+      if (!r.notes.length) throw new Error('noNotes');
+      // the part is written for the player's instrument: store concert pitch, keep the written names
+      r.notes.forEach(n => { n.c = n.c - inst.transpose; });
+      r.namesFor = instrumentId;
+      return r;
+    }
     let text;
     if (/\.mxl$/i.test(f.name)) text = await M.unzipFirstXml(await f.arrayBuffer()); else text = await f.text();
     const sc = M.parseMusicXML(text, inst.transpose);
@@ -652,9 +673,9 @@ registerProcessor('jm-rec',R);`;
       if (st.step === 1) body = `<h2>על מה אתה מנגן?</h2><div class="sub">ככה אראה לך את התווים בטונליות של הכלי שלך.</div>
         <div class="choices">${M.INSTRUMENTS.map(i => `<button class="choice ${st.instrument === i.id ? 'on' : ''}" data-i="${i.id}"><span class="e">${i.e}</span>${esc(i.name)}<small class="ltr">${i.key !== 'C' ? i.key : ''}</small></button>`).join('')}</div>
         <button class="btn primary" id="next">המשך</button>`;
-      if (st.step === 2) body = `<h2>התווים שלך</h2><div class="sub">צלם את דפי התווים או בחר קובץ. הכי טוב: קובץ MusicXML מ-MuseScore (File ‹ Export), ממנו אני קורא את התווים במדויק ובודק אותך.</div>
-        <div class="row"><div class="drop ${st.sheetImages.length ? 'done' : ''}" id="cam"><span class="e">📷</span><b>צלם תווים</b><span class="sub">אפשר כמה דפים</span></div>
-        <div class="drop ${st.score ? 'done' : ''}" id="file"><span class="e">📄</span><b>בחר קובץ</b><span class="sub">MusicXML, PDF או תמונה</span></div></div>
+      if (st.step === 2) body = `<h2>התווים שלך</h2><div class="sub">בחר את קובץ ה-PDF של התווים, כמו שקיבלת אותו מהמעבד. אני קורא ממנו את התווים ובודק אותך לפיהם.</div>
+        <div class="row"><div class="drop ${st.score ? 'done' : ''}" id="file"><span class="e">📄</span><b>בחר קובץ</b><span class="sub">ה-PDF של התווים</span></div>
+        <div class="drop ${st.sheetImages.length ? 'done' : ''}" id="cam"><span class="e">📷</span><b>צלם תווים</b><span class="sub">בלי בדיקת טעויות בינתיים</span></div></div>
         <div id="sheetInfo"></div>
         <button class="btn primary" id="next">${st.score || st.sheetImages.length ? 'המשך' : 'דלג בינתיים'}</button>`;
       if (st.step === 3) body = `<h2>השיר</h2><div class="sub">ההקלטה של ההרכב (או הפלייבק) שעליה תתאמן.</div>
@@ -670,19 +691,29 @@ registerProcessor('jm-rec',R);`;
         const info = document.getElementById('sheetInfo');
         const showInfo = () => {
           let h = '';
-          if (st.score) h += `<div class="card" style="margin-top:12px">✅ קראתי ${st.score.notes.length} תווים ב-${st.score.measureStart.length} תיבות${st.score.tempo ? ` · טמפו ${st.score.tempo}` : ''}</div>`;
+          if (st.reading) h += `<div class="card" style="margin-top:12px;text-align:center"><div class="spinner" style="margin:6px auto"></div>קורא את התווים…</div>`;
+          if (st.score) {
+            const secs = (st.score.sections || []).filter(x => x.name !== 'התחלה').map(x => x.name);
+            h += `<div class="card" style="margin-top:12px"><div style="font-weight:700">✅ קראתי את התווים${st.score.title ? ': ' + esc(st.score.title) : ''}</div><div class="sub">${st.score.notes.length} תווים ב-${st.score.measureStart.length} תיבות${st.score.tempo ? ` · טמפו ${st.score.tempo}` : ''}</div>${secs.length ? `<div class="sub">${esc(secs.join(' · '))}</div>` : ''}</div>`;
+            if (st.score.warnings && st.score.warnings.length) h += `<div class="warnbox">ב-${st.score.warnings.length} תיבות (${st.score.warnings.slice(0, 6).map(w => w.m).join(', ')}) לא הצלחתי לקרוא את הקצב בוודאות. הבדיקה שם עלולה לטעות.</div>`;
+          }
           if (st.sheetImages.length) h += `<div class="thumbs">${st.sheetImages.map(f => `<img src="${URL.createObjectURL(f)}" alt="">`).join('')}</div>
-            ${!st.score ? `<div class="warnbox" style="margin-top:10px">שמרתי את התמונות. קריאת תווים אוטומטית מצילום עוד לא קיימת באב-הטיפוס, אז בינתיים תוכל לנגן ולהקליט בלי בדיקת טעויות. עם קובץ MusicXML תקבל בדיקה מלאה.</div>` : ''}`;
-          if (st.pdf && !st.score) h += `<div class="warnbox" style="margin-top:10px">שמרתי את ה-PDF. קריאת תווים מ-PDF עוד לא קיימת באב-הטיפוס. אם התווים נכתבו ב-MuseScore, ייצא MusicXML ובחר אותו כאן.</div>`;
+            ${!st.score ? `<div class="warnbox" style="margin-top:10px">שמרתי את התמונות. קריאת תווים מצילום עוד לא קיימת, אז מתמונה אפשר לנגן ולהקליט בלי בדיקת טעויות. אם יש לך את קובץ ה-PDF של התווים, בחר אותו ותקבל בדיקה מלאה.</div>` : ''}`;
+          if (st.pdf && !st.score && !st.reading) h += `<div class="warnbox" style="margin-top:10px">ה-PDF הזה נראה כמו סריקה או צילום של דף, ולכן לא הצלחתי לקרוא ממנו את התווים. אני קורא PDF שיצא מתוכנת תווים (MuseScore, Sibelius, Finale, Dorico). שמרתי אותו, ואפשר לנגן ולהקליט בלי בדיקה.</div>`;
           info.innerHTML = h;
         };
         showInfo();
         document.getElementById('cam').onclick = () => pickFile('image/*', files => { st.sheetImages.push(...files); render(); }, { capture: true, multiple: true });
-        document.getElementById('file').onclick = () => pickFile('.musicxml,.xml,.mxl,application/pdf,image/*', async f => {
+        document.getElementById('file').onclick = () => pickFile('application/pdf,.pdf,.musicxml,.xml,.mxl,image/*', async f => {
           if (/\.(musicxml|xml|mxl)$/i.test(f.name)) {
             try { st.score = await readScoreFile(f, st.instrument); st.scoreFile = f; render(); }
             catch (e) { toast('לא הצלחתי לקרוא את הקובץ כ-MusicXML'); }
-          } else if (/pdf$/i.test(f.type) || /\.pdf$/i.test(f.name)) { st.pdf = f; showInfo(); }
+          } else if (isPdf(f)) {
+            st.pdf = f; st.score = null; st.reading = true; render();
+            try { st.score = await readScoreFile(f, st.instrument); }
+            catch (e) { if (e.message === 'pdflib') toast('צריך חיבור לאינטרנט כדי לקרוא PDF בפעם הראשונה'); }
+            st.reading = false; render();
+          }
           else { st.sheetImages.push(f); render(); }
         });
       }
