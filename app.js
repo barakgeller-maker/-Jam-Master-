@@ -76,9 +76,23 @@
   // ---------- audio ----------
   let ctx = null;
   function ac() {
-    if (!ctx) { const C = window.AudioContext || window.webkitAudioContext; ctx = new C({ latencyHint: 'interactive' }); }
-    if (ctx.state === 'suspended') ctx.resume();
+    if (!ctx || ctx.state === 'closed') { const C = window.AudioContext || window.webkitAudioContext; ctx = new C({ latencyHint: 'interactive' }); }
+    if (ctx.state !== 'running') { try { ctx.resume(); } catch (e) { } }
     return ctx;
+  }
+  // Phones (iOS especially) can leave the audio engine "interrupted" after recording or after the
+  // screen changes; then nothing plays and the clock stands still. Wake it, or start a fresh one.
+  async function readyAudio() {
+    let c = ac();
+    if (c.state !== 'running') { try { await Promise.race([c.resume(), new Promise(r => setTimeout(r, 400))]); } catch (e) { } }
+    if (c.state !== 'running') c = resetAudio();
+    return c;
+  }
+  function resetAudio() {
+    try { if (mic) mic.stream.getTracks().forEach(t => t.stop()); } catch (e) { }
+    mic = null;
+    try { ctx && ctx.close(); } catch (e) { }
+    ctx = null; return ac();
   }
   const bufCache = {};
   async function songBuffer(jam) {
@@ -97,7 +111,12 @@ flush(){this.port.postMessage({type:'data',frame:this.f0,buf:this.buf.slice(0,th
 process(inp){const ch=inp[0]&&inp[0][0];if(this.on&&ch){if(this.n===0)this.f0=currentFrame;this.buf.set(ch,this.n);this.n+=ch.length;if(this.n+128>this.buf.length)this.flush()}return true}}
 registerProcessor('jm-rec',R);`;
   async function ensureMic() {
-    if (mic) return mic;
+    if (mic) {
+      const tr = mic.stream.getAudioTracks()[0];
+      if (mic.ctx === ctx && tr && tr.readyState === 'live') return mic;
+      try { mic.stream.getTracks().forEach(t => t.stop()); } catch (e) { }
+      mic = null;
+    }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('nomic');
     const c = ac();
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } });
@@ -112,7 +131,7 @@ registerProcessor('jm-rec',R);`;
     } else { node = c.createScriptProcessor(4096, 1, 1); kind = 'sp'; }
     src.connect(node); node.connect(sink);
     const tr = stream.getAudioTracks()[0]; const st = tr.getSettings ? tr.getSettings() : {};
-    mic = { stream, src, node, analyser, kind, inLat: typeof st.latency === 'number' ? st.latency : 0.012, chunks: [], firstFrame: null, on: false };
+    mic = { ctx: c, stream, src, node, analyser, kind, inLat: typeof st.latency === 'number' ? st.latency : 0.012, chunks: [], firstFrame: null, on: false };
     if (kind === 'worklet') node.port.onmessage = e => { if (e.data.type === 'data' && mic.on) { if (mic.firstFrame == null) mic.firstFrame = e.data.frame; mic.chunks.push(e.data.buf); } };
     else node.onaudioprocess = e => { if (!mic.on) return; if (mic.firstFrame == null) mic.firstFrame = Math.round((e.playbackTime - 4096 / c.sampleRate) * c.sampleRate); mic.chunks.push(e.inputBuffer.getChannelData(0).slice(0)); };
     return mic;
@@ -334,21 +353,27 @@ registerProcessor('jm-rec',R);`;
     // ---- run state ----
     let run = null; // {mode, src, T0, S, endT, startT, raf, live}
     function idle() {
-      ctl.innerHTML = `<button class="round small" id="bListen" aria-label="האזנה">▶<span class="lbl"></span></button>
-        <button class="round rec" id="bRec" aria-label="הקלטה">●</button>`;
-      ctl.insertAdjacentHTML('afterend', '');
+      ctl.innerHTML = `<div style="text-align:center"><button class="round rec" id="bRec" aria-label="נגן והקלט">●</button><div class="hint" style="font-weight:700;color:var(--text)">נגן והקלט</div></div>
+        <div style="text-align:center"><button class="round small" id="bListen" aria-label="רק האזנה">▶</button><div class="hint">רק האזנה</div></div>`;
       document.getElementById('bListen').onclick = () => start('listen');
       document.getElementById('bRec').onclick = () => start('record');
     }
     function runningUI() {
-      ctl.innerHTML = `<div style="text-align:center"><button class="round play" id="bStop" aria-label="עצור">■</button><div class="hint">${run.mode === 'listen' ? 'האזנה' : '<span class="recdot"></span>מקליט'}</div></div>`;
+      if (run.mode === 'listen') {
+        ctl.innerHTML = `<div style="text-align:center"><button class="round rec" id="bArm" aria-label="הקלט מכאן">●</button><div class="hint" style="font-weight:700;color:var(--text)">הקלט מכאן</div></div>
+          <div style="text-align:center"><button class="round small" id="bStop" aria-label="עצור">■</button><div class="hint">עצור</div></div>`;
+        document.getElementById('bArm').onclick = () => armRecord();
+      } else {
+        ctl.innerHTML = `<div style="text-align:center"><button class="round rec" id="bStop" aria-label="עצור">■</button><div class="hint" style="font-weight:700;color:var(--text)"><span class="recdot"></span>מקליט · לחץ לסיום וקבלת דוח</div></div>`;
+      }
       document.getElementById('bStop').onclick = () => stop(true);
     }
     idle();
 
     async function start(mode, fromT, opts) {
       opts = opts || {};
-      const c = ac();
+      if (run) return;
+      let c = await readyAudio();
       if (mode === 'record') {
         try { await ensureMic(); } catch (e) {
           sheet(`<h3>אין גישה למיקרופון</h3><div class="sub">${e && e.message === 'nomic' ? 'הדפדפן הזה לא מאפשר הקלטה. פתח את האפליקציה ב-Chrome או ב-Safari.' : 'צריך לאשר גישה למיקרופון כדי להקליט. אם סירבת, אפשר לאשר מחדש בהגדרות האתר בדפדפן.'}</div><button class="btn" data-close>סגור</button>`);
@@ -361,7 +386,7 @@ registerProcessor('jm-rec',R);`;
       if (S >= dur - 0.5) S = 0;
       const src = c.createBufferSource(); src.buffer = buf; src.connect(c.destination);
       const T0 = c.currentTime + 0.12;
-      if (mode === 'record') micStart();
+      if (mode === 'record') { if (mic.ctx !== c) { await ensureMic(); } micStart(); }
       src.start(T0, S);
       run = { mode, src, T0, S, endT, startT: S, liveState: { badSince: null, silentSince: null, extraSince: null } };
       src.onended = () => { if (run && run.src === src) stop(true); };
@@ -379,6 +404,35 @@ registerProcessor('jm-rec',R);`;
         run.raf = requestAnimationFrame(loop);
       };
       run.raf = requestAnimationFrame(loop);
+      // watchdog: if the audio clock does not move, restart once with a fresh audio engine
+      const myRun = run, t0 = c.currentTime;
+      setTimeout(async () => {
+        if (run !== myRun || c.currentTime - t0 > 0.3) return;
+        try { myRun.src.onended = null; myRun.src.stop(); } catch (e) { }
+        cancelAnimationFrame(myRun.raf); if (mic) mic.on = false; run = null;
+        if (opts.retried) { idle(); toast('השמע לא מתחיל. סגור את הדפדפן ופתח מחדש.', 4000); return; }
+        resetAudio(); toast('מפעיל מחדש את השמע…', 1500);
+        start(mode, S, { ...opts, endT, retried: true });
+      }, 900);
+    }
+
+    // start recording while the song is already playing (the song keeps going)
+    async function armRecord() {
+      if (!run || run.mode !== 'listen' || run.arming) return;
+      run.arming = true;
+      const r = run;
+      try { await ensureMic(); } catch (e) {
+        r.arming = false;
+        sheet(`<h3>אין גישה למיקרופון</h3><div class="sub">צריך לאשר גישה למיקרופון כדי להקליט. אם סירבת, אפשר לאשר מחדש בהגדרות האתר בדפדפן.</div><button class="btn" data-close>סגור</button>`);
+        return;
+      }
+      if (run !== r) return; // stopped meanwhile
+      const c = ac();
+      micStart();
+      r.mode = 'record'; r.arming = false;
+      r.startT = Math.max(0, r.S + (c.currentTime - r.T0) - outLatency());
+      r.liveState = { badSince: null, silentSince: null, extraSince: null };
+      runningUI();
     }
 
     // real-time mistake detection
@@ -591,7 +645,7 @@ registerProcessor('jm-rec',R);`;
     document.getElementById('again').onclick = () => go('#/jam/' + encodeURIComponent(jam.id));
     document.getElementById('delTake').onclick = async () => { await DB.del('takes', take.id); go('#/jam/' + encodeURIComponent(jam.id)); };
 
-    const c = ac();
+    let c = await readyAudio();
     const songBuf = await songBuffer(jam);
     const pcm = new Float32Array(await take.pcm.arrayBuffer());
     const recBuf = c.createBuffer(1, pcm.length, take.sr); recBuf.copyToChannel ? recBuf.copyToChannel(pcm, 0) : recBuf.getChannelData(0).set(pcm);
@@ -608,6 +662,7 @@ registerProcessor('jm-rec',R);`;
     vS.oninput = vM.oninput = setG; setG();
     const bPlay = document.getElementById('bPlay');
     function playFrom(t) {
+      if (c.state !== "running") { try { c.resume(); } catch (e) { } }
       stopPb(); const T = c.currentTime + 0.08;
       const s1 = c.createBufferSource(); s1.buffer = songBuf; s1.connect(gSong); s1.start(T, t, Math.max(0.01, B0 - t));
       const s2 = c.createBufferSource(); s2.buffer = recBuf; s2.connect(gMe);
