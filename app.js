@@ -54,12 +54,14 @@
     try { const idx = await (await fetch('demos/index.json')).json(); demos = await Promise.all(idx.map(d => loadDemo(d.id, d.file))); } catch (e) { console.warn(e); }
     let mine = []; try { mine = await DB.all('jams'); } catch (e) { }
     mine.sort((a, b) => b.created - a.created);
-    return [...mine, ...demos.filter(Boolean)];
+    const hidden = Settings.get('hiddenDemos', []);
+    return [...mine, ...demos.filter(d => d && !hidden.includes(d.id))];
   }
   async function loadDemo(id, file) {
     if (demoCache[id]) return demoCache[id];
     const j = await (await fetch(file || ('demos/' + id.replace('demo-', '') + '.json'))).json();
     j.score.namesFor = j.instrument;
+    const nm = Settings.get('name.' + id, null); if (nm) j.name = nm;
     // a re-sync done on this device overrides the bundled one
     const over = Settings.get('sync.' + id, null); if (over) j.sync = over;
     demoCache[id] = j; return j;
@@ -184,7 +186,9 @@ registerProcessor('jm-rec',R);`;
     const [page, id] = h.split('/');
     window.scrollTo(0, 0);
     try {
-      if (page === 'jam') await JamPage(decodeURIComponent(id));
+      if (!Settings.get('myInstrument', null) && page !== 'welcome') { Welcome(); return; }
+      if (page === 'welcome') Welcome();
+      else if (page === 'jam') await JamPage(decodeURIComponent(id));
       else if (page === 'new') await NewJam();
       else if (page === 'sync') await SyncPage(decodeURIComponent(id));
       else if (page === 'take') await TakePage(decodeURIComponent(id));
@@ -194,21 +198,87 @@ registerProcessor('jm-rec',R);`;
   }
   if (!IN_FRAME) window.addEventListener('hashchange', route);
 
-  // ---------- Home ----------
+  // ---------- First launch: what do you play? ----------
+  const myInstrument = () => Settings.get('myInstrument', 'alto');
+  function instrumentGrid(sel) {
+    return `<div class="choices big">${M.INSTRUMENTS.map(i => `<button class="choice ${sel === i.id ? 'on' : ''}" data-i="${i.id}"><span class="e">${i.e}</span>${esc(i.name)}<small class="ltr">${i.key !== 'C' ? 'in ' + i.key : '&nbsp;'}</small></button>`).join('')}</div>`;
+  }
+  function Welcome() {
+    const first = !Settings.get('myInstrument', null);
+    let sel = Settings.get('myInstrument', null);
+    $app.innerHTML = `<div class="wrap wz"><div class="top">${first ? `<div class="brand"><div class="logo">J</div><b>Jam Master</b></div>` : `<button class="iconbtn" id="back">→</button><h1>הכלי שלי</h1>`}</div>
+      <h2>על מה אתה מנגן?</h2><div class="sub">לפי זה אציג לך את התווים בטונליות של הכלי שלך ואזהה את הצלילים שאתה מנגן. אפשר לשנות בכל רגע.</div>
+      ${instrumentGrid(sel)}
+      <button class="btn primary" id="go" ${sel ? '' : 'disabled'}>${first ? 'יאללה, מתחילים' : 'שמור'}</button></div>`;
+    const back = document.getElementById('back'); if (back) back.onclick = () => go('');
+    const goBtn = document.getElementById('go');
+    $app.querySelectorAll('.choice').forEach(b => b.onclick = () => { sel = b.dataset.i; $app.querySelectorAll('.choice').forEach(x => x.classList.toggle('on', x === b)); goBtn.disabled = false; });
+    goBtn.onclick = () => { Settings.set('myInstrument', sel); go(''); };
+  }
+
+  // ---------- Home: My Jams ----------
+  async function deleteJam(jam) {
+    if (jam.demo) { const h = Settings.get('hiddenDemos', []); if (!h.includes(jam.id)) h.push(jam.id); Settings.set('hiddenDemos', h); }
+    else { await DB.del('jams', jam.id); await DB.del('blobs', 'audio:' + jam.id); }
+    for (const t of await DB.takesFor(jam.id).catch(() => [])) await DB.del('takes', t.id);
+  }
+  async function renameJam(jam, name) {
+    name = name.trim(); if (!name) return;
+    if (jam.demo) { Settings.set('name.' + jam.id, name); jam.name = name; }
+    else { jam.name = name; await DB.put('jams', jam); }
+  }
+  function askRename(jam, done) {
+    let val = jam.name;
+    sheet(`<h3>שם חדש</h3><input class="field" id="rn" value="${esc(jam.name)}" maxlength="60"><button class="btn primary" data-act="ok" style="margin-top:12px">שמור</button><button class="btn ghost" data-close>ביטול</button>`, async a => { if (a === 'ok') { await renameJam(jam, val); done && done(); } });
+    const rn = document.getElementById('rn'); rn.oninput = () => val = rn.value; setTimeout(() => { rn.focus(); rn.select(); }, 50);
+  }
+  function askDelete(jam, done) {
+    sheet(`<h3>למחוק את "${esc(jam.name)}"?</h3><div class="sub">${jam.demo ? 'הדוגמה תוסתר מהרשימה, אפשר להחזיר אותה בהגדרות.' : 'השיר, התווים וכל ההקלטות שלו יימחקו מהטלפון.'}</div><button class="btn rec" data-act="yes">מחק</button><button class="btn ghost" data-close>ביטול</button>`, async a => { if (a === 'yes') { await deleteJam(jam); done && done(); } });
+  }
   async function Home() {
-    $app.innerHTML = `<div class="wrap"><div class="top"><div class="brand"><div class="logo">J</div><b>Jam Master</b></div><button class="iconbtn" id="set" aria-label="הגדרות">⚙️</button></div><div class="spinner"></div></div>`;
+    const mi = M.instrument(myInstrument());
+    $app.innerHTML = `<div class="wrap"><div class="top"><div class="brand"><div class="logo">J</div><b>Jam Master</b></div><button class="mychip" id="myInst" aria-label="הכלי שלי">${mi.e} ${esc(mi.name)}</button><button class="iconbtn" id="set" aria-label="הגדרות">⚙️</button></div><div class="spinner"></div></div>`;
     document.getElementById('set').onclick = () => go('#/settings');
+    document.getElementById('myInst').onclick = () => go('#/welcome');
     const jams = await listJams();
     const takes = await DB.all('takes').catch(() => []);
-    const best = {}; takes.forEach(t => { best[t.jamId] = Math.max(best[t.jamId] || 0, t.report ? t.report.stats.score : 0); });
+    const last = {}; takes.forEach(t => { if (t.report && t.report.stats.total && (!last[t.jamId] || t.created > last[t.jamId].created)) last[t.jamId] = t; });
     const items = jams.map(j => {
-      const inst = M.instrument(j.instrument);
+      const inst = M.instrument(j.instrument); const lt = last[j.id]; const sc = lt ? lt.report.stats.score : null;
+      const col = sc == null ? '' : sc >= 85 ? 'var(--good)' : sc >= 60 ? 'var(--warn)' : 'var(--bad)';
       const tags = [j.demo ? '<span class="pill">דוגמה</span>' : '', !hasScore(j) ? '<span class="pill warn">בלי תווים</span>' : (!hasSync(j) || j.sync.verified === false) ? '<span class="pill warn">צריך סנכרון</span>' : ''].join('');
-      return `<div class="card jam" data-id="${esc(j.id)}"><div class="art">${inst.e}</div><div style="flex:1;min-width:0"><div class="t">${esc(j.name)}${tags}</div><div class="meta">${esc(j.artist ? j.artist + ' · ' : '')}${esc(inst.name)}${best[j.id] ? ' · שיא: ' + best[j.id] + '%' : ''}</div></div><div style="color:var(--dim);font-size:22px">‹</div></div>`;
+      return `<div class="swipe" data-id="${esc(j.id)}"><div class="acts"><button data-a="ren">✏️<span>שם</span></button><button data-a="del" class="del">🗑️<span>מחק</span></button></div>
+        <div class="card jam"><div class="art">${inst.e}</div><div style="flex:1;min-width:0"><div class="t">${esc(j.name)}${tags}</div><div class="meta">${esc(inst.name)}${lt ? ' · ' + new Date(lt.created).toLocaleDateString('he-IL') : ''}</div></div>
+        ${sc != null ? `<div class="last" style="color:${col}">${sc}%<small>אחרון</small></div>` : `<div class="last none">חדש</div>`}</div></div>`;
     }).join('');
-    $app.querySelector('.spinner').outerHTML = `<div class="sub" style="margin:-6px 0 14px">בחר שיר והתאמן על החלק שלך עם ההרכב</div>${items || '<div class="empty">אין עדיין ג׳אמים</div>'}<button class="newjam" id="nj">＋ ג׳אם חדש</button>`;
-    $app.querySelectorAll('.jam').forEach(el => el.onclick = () => go('#/jam/' + encodeURIComponent(el.dataset.id)));
+    $app.querySelector('.spinner').outerHTML = `<button class="newjam big" id="nj"><span>＋</span> ג׳אם חדש</button>
+      <div class="h2" style="margin-top:22px">הג׳אמים שלי</div>
+      ${items || '<div class="empty">עוד אין ג׳אמים. לחץ על "ג׳אם חדש" והעלה תווים ושיר.</div>'}
+      ${items ? '<div class="hint" style="text-align:center;margin-top:8px">החלק כרטיס הצידה כדי לשנות שם או למחוק</div>' : ''}`;
     document.getElementById('nj').onclick = () => go('#/new');
+    const byId = Object.fromEntries(jams.map(j => [j.id, j]));
+    $app.querySelectorAll('.swipe').forEach(sw => bindSwipe(sw, byId[sw.dataset.id]));
+  }
+  function bindSwipe(sw, jam) {
+    const card = sw.querySelector('.jam'), acts = sw.querySelector('.acts'); const W = 150;
+    let x0 = null, y0 = 0, dx = 0, open = 0, dragging = false;
+    const set = (v, anim) => { card.style.transition = anim ? 'transform .2s' : 'none'; card.style.transform = v ? `translateX(${v}px)` : ''; acts.classList.toggle('l', v > 0); acts.classList.toggle('r', v < 0); acts.style.opacity = v ? Math.min(1, Math.abs(v) / 60) : 0; };
+    card.addEventListener('pointerdown', e => { x0 = e.clientX; y0 = e.clientY; dx = 0; dragging = false; });
+    card.addEventListener('pointermove', e => {
+      if (x0 == null) return; const d = e.clientX - x0;
+      if (!dragging && Math.abs(d) > 10 && Math.abs(d) > Math.abs(e.clientY - y0)) { dragging = true; try { card.setPointerCapture(e.pointerId); } catch (_) { } }
+      if (dragging) { dx = d; set(Math.max(-W - 30, Math.min(W + 30, open + dx))); }
+    });
+    const end = () => {
+      if (x0 == null) return; x0 = null; if (!dragging) return;
+      const v = open + dx; open = Math.abs(v) > W / 2 ? Math.sign(v) * W : 0; set(open, true);
+      if (open) $app.querySelectorAll('.swipe').forEach(o => { if (o !== sw && o._close) o._close(); });
+    };
+    card.addEventListener('pointerup', end); card.addEventListener('pointercancel', end);
+    sw._close = () => { open = 0; set(0, true); };
+    card.addEventListener('click', e => { if (dragging) { dragging = false; e.preventDefault(); return; } if (open) { sw._close(); return; } go('#/jam/' + encodeURIComponent(jam.id)); });
+    acts.addEventListener('click', e => { const b = e.target.closest('[data-a]'); if (!b) return; sw._close(); if (b.dataset.a === 'ren') askRename(jam, () => route()); else askDelete(jam, () => route()); });
+    card.style.touchAction = 'pan-y';
   }
 
   // ---------- Settings ----------
@@ -218,8 +288,12 @@ registerProcessor('jm-rec',R);`;
     <div class="card"><div style="font-weight:700">תיקון השהיה (אוזניות)</div>
     <div class="hint">אם בדוחות כל הכניסות יוצאות מאוחרות באותה כמות, זו השהיה של האוזניות. עם אוזניות חוטיות בדרך כלל אין צורך. עם בלוטות׳ זה בערך 150 עד 250.</div>
     <div class="slider"><label class="ltr" id="lv">${lat} ms</label><input type="range" min="0" max="400" step="10" value="${lat}" id="lat"></div></div>
+    <div class="card" id="myI" style="cursor:pointer"><div style="font-weight:700">הכלי שלי</div><div class="hint">${M.instrument(myInstrument()).e} ${esc(M.instrument(myInstrument()).name)} · לחץ לשינוי</div></div>
+    ${Settings.get('hiddenDemos', []).length ? `<button class="btn" id="unhide">החזר את שירי הדוגמה לרשימה</button>` : ''}
     <div class="card"><div style="font-weight:700">על האפליקציה</div><div class="hint">Jam Master, אב-טיפוס. ההקלטות והג׳אמים נשמרים רק בטלפון הזה.</div></div></div>`;
     document.getElementById('back').onclick = () => go('');
+    document.getElementById('myI').onclick = () => go('#/welcome');
+    const uh = document.getElementById('unhide'); if (uh) uh.onclick = () => { Settings.set('hiddenDemos', []); toast('הדוגמאות חזרו'); go(''); };
     const r = document.getElementById('lat'); r.oninput = () => { document.getElementById('lv').textContent = r.value + ' ms'; Settings.set('latencyMs', +r.value); };
   }
 
@@ -548,10 +622,12 @@ registerProcessor('jm-rec',R);`;
     sheet(`<h3>${esc(jam.name)}</h3>
       ${hasScore(jam) ? `<button class="btn" data-act="sync">🎚️ סנכרון השיר לתווים</button>` : ''}
       ${!jam.demo ? `<button class="btn" data-act="xml">📄 ${hasScore(jam) ? 'החלף' : 'הוסף'} תווים (PDF)</button>` : ''}
-      ${!jam.demo ? `<button class="btn ghost" data-act="del" style="color:var(--bad)">מחק את הג׳אם</button>` : ''}
+      <button class="btn" data-act="ren">✏️ שנה שם</button>
+      <button class="btn ghost" data-act="del" style="color:var(--bad)">מחק את הג׳אם</button>
       <button class="btn ghost" data-close>סגור</button>`, async act => {
       if (act === 'sync') go('#/sync/' + encodeURIComponent(jam.id));
-      if (act === 'del') sheet(`<h3>למחוק את "${esc(jam.name)}"?</h3><div class="sub">כל ההקלטות של הג׳אם יימחקו מהטלפון.</div><button class="btn rec" data-act="yes">מחק</button><button class="btn ghost" data-close>ביטול</button>`, async a => { if (a !== 'yes') return; await DB.del('jams', jam.id); await DB.del('blobs', 'audio:' + jam.id); for (const t of await DB.takesFor(jam.id)) await DB.del('takes', t.id); go(''); });
+      if (act === 'del') askDelete(jam, () => go(''));
+      if (act === 'ren') askRename(jam, () => route());
       if (act === 'xml') pickFile('application/pdf,.pdf,.musicxml,.xml,.mxl', async f => {
         toast('קורא את התווים…', 1500);
         try { const sc = await readScoreFile(f, jam.instrument); jam.score = sc; jam.sync = null; await DB.put('jams', jam); toast('התווים נטענו: ' + sc.notes.length + ' תווים'); go('#/sync/' + encodeURIComponent(jam.id)); }
@@ -726,10 +802,10 @@ registerProcessor('jm-rec',R);`;
 
   // ---------- New Jam wizard ----------
   async function NewJam() {
-    const st = { step: 0, name: '', instrument: Settings.get('lastInstrument', 'alto'), score: null, scoreFile: null, sheetImages: [], audio: null, audioName: '', audioDur: 0 };
-    const STEPS = 4;
+    const st = { step: 0, name: null, instrument: myInstrument(), detected: null, score: null, scoreFile: null, sheetImages: [], audio: null, audioName: '', audioDur: 0 };
+    const STEPS = 3;
     function autoName() {
-      if (st.name.trim()) return st.name.trim();
+      if (st.name != null && st.name.trim()) return st.name.trim();
       if (st.score && st.score.title) return st.score.title;
       if (st.audioName) { const n = st.audioName.replace(/\.[^.]+$/, '').replace(/^(AUD|PTT|VID)-\d+-WA\d+$/i, '').replace(/[_-]+/g, ' ').trim(); if (n) return n; }
       const d = new Date(); return `ג׳אם ${d.getDate()}.${d.getMonth() + 1} · ${d.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })}`;
@@ -737,27 +813,29 @@ registerProcessor('jm-rec',R);`;
     function render() {
       const bar = `<div class="steps">${Array.from({ length: STEPS }, (_, i) => `<i class="${i <= st.step ? 'on' : ''}"></i>`).join('')}</div>`;
       let body = '';
-      if (st.step === 0) body = `<h2>איך נקרא לג׳אם?</h2><div class="sub">לא חובה. אם תשאיר ריק, אתן שם לבד לפי השיר.</div>
-        <input class="field" id="nm" style="margin-top:16px" placeholder="למשל: יוצא לאור" value="${esc(st.name)}" maxlength="60">
-        <button class="btn primary" id="next">המשך</button>`;
-      if (st.step === 1) body = `<h2>על מה אתה מנגן?</h2><div class="sub">ככה אראה לך את התווים בטונליות של הכלי שלך.</div>
-        <div class="choices">${M.INSTRUMENTS.map(i => `<button class="choice ${st.instrument === i.id ? 'on' : ''}" data-i="${i.id}"><span class="e">${i.e}</span>${esc(i.name)}<small class="ltr">${i.key !== 'C' ? i.key : ''}</small></button>`).join('')}</div>
-        <button class="btn primary" id="next">המשך</button>`;
-      if (st.step === 2) body = `<h2>התווים שלך</h2><div class="sub">בחר את קובץ ה-PDF של התווים, כמו שקיבלת אותו מהמעבד. אני קורא ממנו את התווים ובודק אותך לפיהם.</div>
+      if (st.step === 0) body = `<h2>התווים שלך</h2><div class="sub">בחר את קובץ ה-PDF של התווים, כמו שקיבלת אותו מהמעבד. אני קורא ממנו את התווים ובודק אותך לפיהם.</div>
         <div class="row"><div class="drop ${st.score ? 'done' : ''}" id="file"><span class="e">📄</span><b>בחר קובץ</b><span class="sub">ה-PDF של התווים</span></div>
         <div class="drop ${st.sheetImages.length ? 'done' : ''}" id="cam"><span class="e">📷</span><b>צלם תווים</b><span class="sub">בלי בדיקת טעויות בינתיים</span></div></div>
         <div id="sheetInfo"></div>
         <button class="btn primary" id="next">${st.score || st.sheetImages.length ? 'המשך' : 'דלג בינתיים'}</button>`;
-      if (st.step === 3) body = `<h2>השיר</h2><div class="sub">ההקלטה של ההרכב (או הפלייבק) שעליה תתאמן.</div>
-        <div class="drop ${st.audio ? 'done' : ''}" id="aud"><span class="e">🎵</span><b>${st.audio ? esc(st.audioName) : 'בחר קובץ שמע'}</b><span class="sub">${st.audio ? fmt(st.audioDur) : 'mp3, m4a, wav ועוד'}</span></div>
-        <div class="card" style="margin-top:14px"><div class="sub">שם הג׳אם</div><div style="font-weight:700;font-size:18px">${esc(autoName())}</div></div>
-        <button class="btn primary" id="next" ${st.audio ? '' : 'disabled'}>${st.score ? 'צור ועבור לסנכרון' : 'צור ג׳אם'}</button>`;
+      if (st.step === 1) body = `<h2>השיר</h2><div class="sub">ההקלטה של ההרכב (או הפלייבק) שעליה תתאמן.</div>
+        <div class="drop ${st.audio ? 'done' : ''}" id="aud"><span class="e">🎵</span><b>${st.audio ? esc(st.audioName) : 'בחר קובץ שמע'}</b><span class="sub">${st.audio ? fmt(st.audioDur) : 'mp3, m4a, wav, וגם קבצים מהוואטסאפ'}</span></div>
+        <button class="btn primary" id="next" ${st.audio ? '' : 'disabled'}>המשך</button>`;
+      if (st.step === 2) body = `<h2>כמעט סיימנו</h2><div class="sub">${st.detected ? `לפי התווים זה חלק של <b>${esc(M.instrument(st.detected).name)}</b>. אם זה לא נכון, בחר כלי אחר.` : 'על איזה כלי החלק הזה?'}</div>
+        ${st.detected && !st.pickInst ? `<div class="card instpick"><span class="e">${M.instrument(st.instrument).e}</span><div style="flex:1"><b>${esc(M.instrument(st.instrument).name)}</b><div class="sub">זיהיתי מהתווים ✓</div></div><button class="btn ghost" id="chg" style="width:auto;margin:0">שנה</button></div>`
+          : instrumentGrid(st.instrument).replace('choices big', 'choices compact')}
+        <div class="sub" style="margin-top:18px">שם הג׳אם</div>
+        <input class="field" id="nm" value="${esc(autoName())}" maxlength="60">
+        <button class="btn primary" id="next">${st.score ? 'צור ועבור לסנכרון' : 'צור ג׳אם'}</button>`;
       $app.innerHTML = `<div class="wrap wz"><div class="top"><button class="iconbtn" id="back">→</button><h1>ג׳אם חדש</h1></div>${bar}${body}</div>`;
       document.getElementById('back').onclick = () => { if (st.step) { st.step--; render(); } else go(''); };
       const next = document.getElementById('next');
-      if (st.step === 0) { const nm = document.getElementById('nm'); nm.oninput = () => st.name = nm.value; nm.onkeydown = e => { if (e.key === 'Enter') next.click(); }; }
-      if (st.step === 1) document.querySelectorAll('.choice').forEach(b => b.onclick = () => { st.instrument = b.dataset.i; Settings.set('lastInstrument', st.instrument); render(); });
       if (st.step === 2) {
+        const nm = document.getElementById('nm'); nm.oninput = () => st.name = nm.value;
+        const chg = document.getElementById('chg'); if (chg) chg.onclick = () => { st.name = nm.value; st.pickInst = true; render(); };
+        document.querySelectorAll('.choice').forEach(b => b.onclick = () => { st.instrument = b.dataset.i; document.querySelectorAll('.choice').forEach(x => x.classList.toggle('on', x === b)); });
+      }
+      if (st.step === 0) {
         const info = document.getElementById('sheetInfo');
         const showInfo = () => {
           let h = '';
@@ -776,18 +854,18 @@ registerProcessor('jm-rec',R);`;
         document.getElementById('cam').onclick = () => pickFile('image/*', files => { st.sheetImages.push(...files); render(); }, { capture: true, multiple: true });
         document.getElementById('file').onclick = () => pickFile('application/pdf,.pdf,.musicxml,.xml,.mxl,image/*', async f => {
           if (/\.(musicxml|xml|mxl)$/i.test(f.name)) {
-            try { st.score = await readScoreFile(f, st.instrument); st.scoreFile = f; render(); }
+            try { st.score = await readScoreFile(f, 'flute'); st.scoreFile = f; render(); }
             catch (e) { toast('לא הצלחתי לקרוא את הקובץ כ-MusicXML'); }
           } else if (isPdf(f)) {
             st.pdf = f; st.score = null; st.reading = true; render();
-            try { st.score = await readScoreFile(f, st.instrument); }
+            try { st.score = await readScoreFile(f, 'flute'); if (st.score.part) { st.detected = st.score.part; st.instrument = st.score.part; } }
             catch (e) { if (e.message === 'pdflib') toast('צריך חיבור לאינטרנט כדי לקרוא PDF בפעם הראשונה'); }
             st.reading = false; render();
           }
           else { st.sheetImages.push(f); render(); }
         });
       }
-      if (st.step === 3) {
+      if (st.step === 1) {
         document.getElementById('aud').onclick = () => pickFile('audio/*,video/mp4,.m4a,.mp3,.wav,.aac,.ogg', async f => {
           try {
             const ab = await f.arrayBuffer();
@@ -797,9 +875,12 @@ registerProcessor('jm-rec',R);`;
         });
       }
       next.onclick = async () => {
-        if (st.step < 3) { st.step++; render(); return; }
+        if (st.step < 2) { st.step++; render(); return; }
         next.disabled = true; next.textContent = 'שומר…';
         const id = 'j' + Date.now();
+        // the sheet was read at written pitch; now that the instrument is known, store concert pitch
+        if (st.score && st.scoreFile) { try { st.score = await readScoreFile(st.scoreFile, st.instrument); } catch (e) { } }
+        else if (st.score) { const tr = M.instrument(st.instrument).transpose; st.score.notes.forEach(n => { n.c -= tr; }); st.score.namesFor = st.instrument; }
         const jam = { id, name: autoName(), instrument: st.instrument, created: Date.now(), score: st.score, sync: null };
         await DB.put('blobs', st.audio, 'audio:' + id);
         for (let i = 0; i < st.sheetImages.length; i++) await DB.put('blobs', st.sheetImages[i], `sheet:${id}:${i}`);

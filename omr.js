@@ -120,7 +120,7 @@
 
   async function readPdf(pdfjs, data, onProgress) {
     const doc = await pdfjs.getDocument({ data, isEvalSupported: false }).promise;
-    const systems = []; let title = '', titleSize = 0, tempo = 0;
+    const systems = []; let title = '', titleSize = 0, tempo = 0, part = null;
     for (let pn = 1; pn <= doc.numPages; pn++) {
       const page = await doc.getPage(pn);
       const { prims, glyphs, texts } = await pagePrimitives(pdfjs, page);
@@ -132,6 +132,7 @@
         const rtl = line.some(t => /[\u0590-\u05FF\u0600-\u06FF]/.test(t.s));
         line.sort((a, b) => rtl ? b.x - a.x : a.x - b.x);
         title = line.map(t => t.s).join(rtl ? '' : ' ');
+        part = detectPart(texts.map(t => t.s).join(' '));
         if (rtl) { // pdf text for RTL is often one glyph per item: rebuild spaces from gaps
           let out = ''; for (let i = 0; i < line.length; i++) { out += line[i].s; const nx = line[i + 1]; if (nx && line[i].x - (nx.x + nx.w) > mx * 0.2) out += ' '; } title = out;
         }
@@ -156,7 +157,19 @@
     }
     // clean up title (e.g. collapse whitespace)
     title = title.replace(/\s+/g, ' ');
-    return assemble(systems, title, tempo);
+    const out = assemble(systems, title, tempo); out.part = part; return out;
+  }
+  // instrument named on the part (e.g. "Alto Saxophone", "Tpt. in Bb", "סקסופון אלט")
+  function detectPart(txt) {
+    const t = ' ' + txt.toLowerCase() + ' ';
+    const rules = [
+      ['bari', /bari(tone)?\s*sax|\bbar\.?\s*sax|סקסופון\s*בריטון/], ['tenor', /tenor\s*sax|\bt\.?\s*sax|ten\.?\s*sax|סקסופון\s*טנור/],
+      ['soprano', /soprano\s*sax|sop\.?\s*sax|סקסופון\s*סופרן/], ['alto', /alto\s*sax|\ba\.?\s*sax|alt\.?\s*sax|סקסופון\s*אלט|\bsax(ophone)?\b/],
+      ['trumpet', /trumpet|\btpt\b|\btp\.|חצוצרה/], ['trombone', /trombone|\btbn\b|טרומבון/], ['clarinet', /clarinet|\bcl\.|קלרינט/],
+      ['flute', /flute|\bfl\.|חליל/], ['violin', /violin|\bvln\b|כינור/], ['voice', /vocals?\b|voice|שירה/]
+    ];
+    for (const [id, re] of rules) if (re.test(t)) return id;
+    return null;
   }
 
   function assemble(systems, title, tempo) {

@@ -167,3 +167,28 @@ input[type=range]{flex:1;accent-color:var(--accent);height:30px}
 .score-strip .vf-now,.score-strip .vf-now *{fill:var(--accent);stroke:var(--accent)}
 .score-strip .vf-ok,.score-strip .vf-ok *{fill:var(--good);stroke:var(--good)}
 .score-strip .vf-bad,.score-strip .vf-bad *{fill:var(--bad);stroke:var(--bad)}
+/* my jams */
+.mychip{padding:8px 12px;border-radius:99px;background:var(--card);color:var(--text);font-weight:600;font-size:14px;white-space:nowrap;max-width:45%;overflow:hidden;text-overflow:ellipsis}
+.newjam.big{border:0;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#2a1600;font-size:19px;font-weight:800;padding:20px;box-shadow:0 10px 28px #ff8a3d44;display:flex;align-items:center;justify-content:center;gap:10px}
+.newjam.big span{font-size:26px;line-height:1}
+.newjam.big:active{transform:scale(.98);background:linear-gradient(135deg,var(--accent),var(--accent2))}
+.swipe{position:relative;margin-bottom:12px}
+.swipe .jam{position:relative;z-index:1;margin:0;user-select:none;-webkit-user-select:none}
+.swipe .acts{position:absolute;inset:0;display:flex;gap:8px;align-items:stretch;opacity:0;padding:0}
+.swipe .acts.l{justify-content:flex-start;direction:ltr}
+.swipe .acts.r{justify-content:flex-end;direction:ltr}
+.swipe .acts button{width:67px;border-radius:var(--r);background:var(--card2);color:var(--text);font-size:20px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}
+.swipe .acts button span{font-size:12px;color:var(--muted)}
+.swipe .acts button.del{background:#ff6b7a33}
+.jam .last{flex:none;text-align:center;font-weight:800;font-size:20px;min-width:54px;font-variant-numeric:tabular-nums}
+.jam .last small{display:block;font-size:11px;font-weight:500;color:var(--muted)}
+.jam .last.none{font-size:12px;font-weight:600;color:var(--accent);background:#ffb54718;border-radius:99px;padding:4px 8px;min-width:0}
+.choices.big .choice{padding:18px 10px}
+.choices.big .choice .e{font-size:38px;margin-bottom:4px}
+.brand{min-width:0}.brand b{white-space:nowrap}
+.choices.compact{grid-template-columns:1fr 1fr 1fr;gap:8px}
+.choices.compact .choice{padding:10px 4px;font-size:13px}
+.choices.compact .choice .e{font-size:22px}
+.choices.compact .choice small{display:none}
+.instpick{display:flex;align-items:center;gap:12px;margin-top:14px;border-color:var(--accent)}
+.instpick .e{font-size:32px}
