@@ -2,6 +2,7 @@
 (function () {
   'use strict';
   const M = window.Music, A = window.Analysis;
+  const APP_VERSION = '2026.11.13-lists';
   const $app = document.getElementById('app');
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = t => { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = Math.floor(t % 60); return m + ':' + String(s).padStart(2, '0'); };
@@ -388,7 +389,7 @@ registerProcessor('jm-rec',R);`;
     <div class="slider"><label class="ltr" id="lv">${lat} ms</label><input type="range" min="0" max="400" step="10" value="${lat}" id="lat"></div></div>
     <div class="card" id="myI" style="cursor:pointer"><div style="font-weight:700">הכלי שלי</div><div class="hint">${M.instrument(myInstrument()).e} ${esc(M.instrument(myInstrument()).name)} · לחץ לשינוי</div></div>
     ${Settings.get('hiddenDemos', []).length ? `<button class="btn" id="unhide">החזר את שירי הדוגמה לרשימה</button>` : ''}
-    <div class="card"><div style="font-weight:700">על האפליקציה</div><div class="hint">Jam Master, אב-טיפוס. ההקלטות והג׳אמים נשמרים רק בטלפון הזה.</div></div></div>`;
+    <div class="card"><div style="font-weight:700">על האפליקציה</div><div class="hint">Jam Master, גרסה ${APP_VERSION}. אב-טיפוס. ההקלטות והג׳אמים נשמרים רק בטלפון הזה.</div></div></div>`;
     document.getElementById('back').onclick = () => go('');
     document.getElementById('myI').onclick = () => go('#/welcome');
     const uh = document.getElementById('unhide'); if (uh) uh.onclick = () => { Settings.set('hiddenDemos', []); toast('הדוגמאות חזרו'); go(''); };
@@ -1109,6 +1110,14 @@ registerProcessor('jm-rec',R);`;
   }
 
   // PWA service worker (offline shell)
-  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => { });
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    // a new version takes over right away: reload once so its code runs
+    const hadCtl = !!navigator.serviceWorker.controller; let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadCtl && !reloaded && !document.querySelector('.recdot')) { reloaded = true; location.reload(); } });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
+      reg.update().catch(() => { });
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => { }); });
+    }).catch(() => { });
+  }
   route();
 })();
