@@ -216,11 +216,94 @@ registerProcessor('jm-rec',R);`;
     goBtn.onclick = () => { Settings.set('myInstrument', sel); go(''); };
   }
 
+  // ---------- Jam lists (each list holds jam ids; a jam can be in several lists) ----------
+  const Lists = {
+    all() { return Settings.get('lists', null) || []; },
+    save(l) { Settings.set('lists', l); },
+    init(jams) {
+      let l = this.all();
+      if (!l.length) { l = [{ id: 'main', name: 'הג׳אמים שלי', jams: jams.map(j => j.id) }]; this.save(l); }
+      return l;
+    },
+    cur() { const l = this.all(); return l.find(x => x.id === Settings.get('curList', '')) || l[0]; },
+    setCur(id) { Settings.set('curList', id); },
+    add(listId, jamId) { const l = this.all(); const x = l.find(y => y.id === listId) || l[0]; if (x && !x.jams.includes(jamId)) x.jams.unshift(jamId); this.save(l); },
+    remove(listId, jamId) { const l = this.all(); const x = l.find(y => y.id === listId); if (x) x.jams = x.jams.filter(i => i !== jamId); this.save(l); },
+    removeEverywhere(jamId) { const l = this.all(); l.forEach(x => x.jams = x.jams.filter(i => i !== jamId)); this.save(l); },
+    listsOf(jamId) { return this.all().filter(x => x.jams.includes(jamId)); },
+    create(name) {
+      const l = this.all(); let n = 2; while (l.some(x => x.name === 'רשימה ' + n)) n++;
+      const x = { id: 'l' + Date.now(), name: (name || '').trim() || 'רשימה ' + n, jams: [] }; l.push(x); this.save(l); return x;
+    },
+    rename(id, name) { name = (name || '').trim(); if (!name) return; const l = this.all(); const x = l.find(y => y.id === id); if (x) x.name = name; this.save(l); },
+    del(id) { this.save(this.all().filter(x => x.id !== id)); }
+  };
+  function askText(title, value, placeholder, okLabel, cb) {
+    let val = value || '';
+    sheet(`<h3>${esc(title)}</h3><input class="field" id="tx" value="${esc(val)}" placeholder="${esc(placeholder || '')}" maxlength="60"><button class="btn primary" data-act="ok" style="margin-top:12px">${esc(okLabel || 'שמור')}</button><button class="btn ghost" data-close>ביטול</button>`, a => { if (a === 'ok') cb(val); });
+    const tx = document.getElementById('tx'); tx.oninput = () => val = tx.value;
+    tx.onkeydown = e => { if (e.key === 'Enter') { const b = tx.parentElement.querySelector('[data-act="ok"]'); b && b.click(); } };
+    setTimeout(() => { tx.focus(); tx.select(); }, 50);
+  }
+  function listSwitcher() {
+    const l = Lists.all(), cur = Lists.cur();
+    const close = sheet(`<h3>הרשימות שלי</h3>
+      ${l.map(x => `<button class="listrow ${x.id === cur.id ? 'on' : ''}" data-act="sw:${esc(x.id)}" data-lid="${esc(x.id)}"><span class="nm">${esc(x.name)}</span><span class="cnt">${x.jams.length} שירים</span>${x.id === cur.id ? '<span class="ck">✓</span>' : ''}</button>`).join('')}
+      <button class="btn" data-act="new">＋ רשימה חדשה</button>
+      <div class="hint" style="text-align:center">לחיצה ארוכה על רשימה: שינוי שם או מחיקה</div>`, a => {
+      if (a.startsWith('sw:')) { Lists.setCur(a.slice(3)); route(); }
+      if (a === 'new') askText('רשימה חדשה', '', 'למשל: הרכב הג׳אז, הופעה בשישי', 'צור רשימה', v => { const x = Lists.create(v); Lists.setCur(x.id); route(); });
+    });
+    document.querySelectorAll('.listrow').forEach(row => onLongPress(row, () => { close(); manageList(Lists.all().find(x => x.id === row.dataset.lid)); }));
+  }
+  function onLongPress(el, fn) {
+    let t = null, x0 = 0, y0 = 0;
+    el.addEventListener('pointerdown', e => { x0 = e.clientX; y0 = e.clientY; t = setTimeout(() => { t = null; el._lp = true; fn(); }, 550); });
+    const cancel = () => { if (t) { clearTimeout(t); t = null; } };
+    el.addEventListener('pointerup', cancel); el.addEventListener('pointercancel', cancel); el.addEventListener('pointerleave', cancel);
+    el.addEventListener('pointermove', e => { if (Math.hypot(e.clientX - x0, e.clientY - y0) > 10) cancel(); });
+    el.addEventListener('contextmenu', e => e.preventDefault());
+  }
+  async function manageList(x) {
+    if (!x) return;
+    const all = Lists.all();
+    sheet(`<h3>${esc(x.name)}</h3>
+      <button class="btn" data-act="ren">✏️ שנה שם</button>
+      ${all.length > 1 ? `<button class="btn ghost" data-act="del" style="color:var(--bad)">מחק את הרשימה</button>` : ''}
+      <button class="btn ghost" data-close>סגור</button>`, async a => {
+      if (a === 'ren') askText('שם הרשימה', x.name, '', 'שמור', v => { Lists.rename(x.id, v); route(); });
+      if (a === 'del') {
+        const orphans = x.jams.filter(id => Lists.listsOf(id).length === 1);
+        sheet(`<h3>למחוק את הרשימה "${esc(x.name)}"?</h3><div class="sub">${orphans.length ? `${orphans.length === 1 ? 'שיר אחד שנמצא' : orphans.length + ' שירים שנמצאים'} רק ברשימה הזו ${orphans.length === 1 ? 'יימחק' : 'יימחקו'} מהטלפון, יחד עם ההקלטות. שירים שנמצאים גם ברשימות אחרות יישארו שם.` : 'כל השירים שבה נמצאים גם ברשימות אחרות ויישארו שם.'}</div><button class="btn rec" data-act="yes">מחק</button><button class="btn ghost" data-close>ביטול</button>`, async b => {
+          if (b !== 'yes') return;
+          for (const id of orphans) { const j = await getJam(id).catch(() => null); if (j) await deleteJam(j); }
+          Lists.del(x.id); if (Settings.get('curList', '') === x.id) Lists.setCur(''); route();
+        });
+      }
+    });
+  }
+  function askLists(jam, done, nested) {
+    const l = Lists.all(), mine = Lists.listsOf(jam.id).map(x => x.id);
+    sheet(`<h3>באילו רשימות "${esc(jam.name)}"?</h3><div class="sub" style="margin-bottom:8px">אותו שיר יכול להיות בכמה רשימות, בלי להעלות שוב.</div>
+      ${l.map(x => `<button class="listrow ${mine.includes(x.id) ? 'on' : ''}" data-act="tg:${esc(x.id)}"><span class="box">${mine.includes(x.id) ? '✓' : ''}</span><span class="nm">${esc(x.name)}</span></button>`).join('')}
+      <button class="btn" data-act="new">＋ רשימה חדשה</button><button class="btn primary" data-close>סיום</button>`, a => {
+      if (a.startsWith('tg:')) {
+        const id = a.slice(3);
+        if (mine.includes(id)) { if (mine.length === 1) { toast('שיר צריך להיות לפחות ברשימה אחת'); } else Lists.remove(id, jam.id); }
+        else Lists.add(id, jam.id);
+        askLists(jam, done, true);
+      }
+      if (a === 'new') askText('רשימה חדשה', '', '', 'צור רשימה', v => { const x = Lists.create(v); Lists.add(x.id, jam.id); askLists(jam, done, true); });
+    });
+    if (!nested && done) { const obs = new MutationObserver(() => { if (!document.querySelector('.sheet')) { obs.disconnect(); done(); } }); obs.observe(document.body, { childList: true }); }
+  }
+
   // ---------- Home: My Jams ----------
   async function deleteJam(jam) {
     if (jam.demo) { const h = Settings.get('hiddenDemos', []); if (!h.includes(jam.id)) h.push(jam.id); Settings.set('hiddenDemos', h); }
     else { await DB.del('jams', jam.id); await DB.del('blobs', 'audio:' + jam.id); }
     for (const t of await DB.takesFor(jam.id).catch(() => [])) await DB.del('takes', t.id);
+    Lists.removeEverywhere(jam.id);
   }
   async function renameJam(jam, name) {
     name = name.trim(); if (!name) return;
@@ -233,6 +316,14 @@ registerProcessor('jm-rec',R);`;
     const rn = document.getElementById('rn'); rn.oninput = () => val = rn.value; setTimeout(() => { rn.focus(); rn.select(); }, 50);
   }
   function askDelete(jam, done) {
+    const cur = Lists.cur(), others = Lists.listsOf(jam.id).filter(x => !cur || x.id !== cur.id);
+    if (cur && cur.jams.includes(jam.id) && others.length) {
+      sheet(`<h3>להוציא את "${esc(jam.name)}"?</h3><div class="sub">השיר נמצא גם ב${others.map(x => '"' + esc(x.name) + '"').join(', ')}.</div><button class="btn" data-act="out">הוצא רק מ"${esc(cur.name)}"</button><button class="btn rec" data-act="all">מחק לגמרי</button><button class="btn ghost" data-close>ביטול</button>`, async a => {
+        if (a === 'out') { Lists.remove(cur.id, jam.id); done && done(); }
+        if (a === 'all') { await deleteJam(jam); done && done(); }
+      });
+      return;
+    }
     sheet(`<h3>למחוק את "${esc(jam.name)}"?</h3><div class="sub">${jam.demo ? 'הדוגמה תוסתר מהרשימה, אפשר להחזיר אותה בהגדרות.' : 'השיר, התווים וכל ההקלטות שלו יימחקו מהטלפון.'}</div><button class="btn rec" data-act="yes">מחק</button><button class="btn ghost" data-close>ביטול</button>`, async a => { if (a === 'yes') { await deleteJam(jam); done && done(); } });
   }
   async function Home() {
@@ -240,27 +331,34 @@ registerProcessor('jm-rec',R);`;
     $app.innerHTML = `<div class="wrap"><div class="top"><div class="brand"><div class="logo">J</div><b>Jam Master</b></div><button class="mychip" id="myInst" aria-label="הכלי שלי">${mi.e} ${esc(mi.name)}</button><button class="iconbtn" id="set" aria-label="הגדרות">⚙️</button></div><div class="spinner"></div></div>`;
     document.getElementById('set').onclick = () => go('#/settings');
     document.getElementById('myInst').onclick = () => go('#/welcome');
-    const jams = await listJams();
+    const allJams = await listJams();
+    Lists.init(allJams);
+    // jams that ended up in no list (e.g. demos brought back) go to the open list
+    allJams.forEach(j => { if (!Lists.listsOf(j.id).length) Lists.add(Lists.cur().id, j.id); });
+    const cl = Lists.cur(); const byIdAll = Object.fromEntries(allJams.map(j => [j.id, j]));
+    const jams = cl.jams.map(id => byIdAll[id]).filter(Boolean);
     const takes = await DB.all('takes').catch(() => []);
     const last = {}; takes.forEach(t => { if (t.report && t.report.stats.total && (!last[t.jamId] || t.created > last[t.jamId].created)) last[t.jamId] = t; });
     const items = jams.map(j => {
       const inst = M.instrument(j.instrument); const lt = last[j.id]; const sc = lt ? lt.report.stats.score : null;
       const col = sc == null ? '' : sc >= 85 ? 'var(--good)' : sc >= 60 ? 'var(--warn)' : 'var(--bad)';
       const tags = [j.demo ? '<span class="pill">דוגמה</span>' : '', !hasScore(j) ? '<span class="pill warn">בלי תווים</span>' : (!hasSync(j) || j.sync.verified === false) ? '<span class="pill warn">צריך סנכרון</span>' : ''].join('');
-      return `<div class="swipe" data-id="${esc(j.id)}"><div class="acts"><button data-a="ren">✏️<span>שם</span></button><button data-a="del" class="del">🗑️<span>מחק</span></button></div>
+      return `<div class="swipe" data-id="${esc(j.id)}"><div class="acts"><button data-a="ren">✏️<span>שם</span></button><button data-a="lists">📋<span>רשימות</span></button><button data-a="del" class="del">🗑️<span>מחק</span></button></div>
         <div class="card jam"><div class="art">${inst.e}</div><div style="flex:1;min-width:0"><div class="t">${esc(j.name)}${tags}</div><div class="meta">${esc(inst.name)}${lt ? ' · ' + new Date(lt.created).toLocaleDateString('he-IL') : ''}</div></div>
         ${sc != null ? `<div class="last" style="color:${col}">${sc}%<small>אחרון</small></div>` : `<div class="last none">חדש</div>`}</div></div>`;
     }).join('');
     $app.querySelector('.spinner').outerHTML = `<button class="newjam big" id="nj"><span>＋</span> ג׳אם חדש</button>
-      <div class="h2" style="margin-top:22px">הג׳אמים שלי</div>
-      ${items || '<div class="empty">עוד אין ג׳אמים. לחץ על "ג׳אם חדש" והעלה תווים ושיר.</div>'}
-      ${items ? '<div class="hint" style="text-align:center;margin-top:8px">החלק כרטיס הצידה כדי לשנות שם או למחוק</div>' : ''}`;
+      <button class="listtitle" id="lt">${esc(cl.name)} <span>▾</span></button>
+      ${items || '<div class="empty">הרשימה ריקה. לחץ על "ג׳אם חדש" כדי להוסיף שיר, או החלק שיר ברשימה אחרת ובחר "רשימות".</div>'}
+      ${items ? '<div class="hint" style="text-align:center;margin-top:8px">החלק כרטיס הצידה כדי לשנות שם, להוסיף לרשימה או למחוק</div>' : ''}`;
+    document.getElementById('lt').onclick = () => { if (document.getElementById('lt')._lp) { document.getElementById('lt')._lp = false; return; } listSwitcher(); };
+    onLongPress(document.getElementById('lt'), () => manageList(Lists.cur()));
     document.getElementById('nj').onclick = () => go('#/new');
     const byId = Object.fromEntries(jams.map(j => [j.id, j]));
     $app.querySelectorAll('.swipe').forEach(sw => bindSwipe(sw, byId[sw.dataset.id]));
   }
   function bindSwipe(sw, jam) {
-    const card = sw.querySelector('.jam'), acts = sw.querySelector('.acts'); const W = 150;
+    const card = sw.querySelector('.jam'), acts = sw.querySelector('.acts'); const W = 225;
     let x0 = null, y0 = 0, dx = 0, open = 0, dragging = false;
     const set = (v, anim) => { card.style.transition = anim ? 'transform .2s' : 'none'; card.style.transform = v ? `translateX(${v}px)` : ''; acts.classList.toggle('l', v > 0); acts.classList.toggle('r', v < 0); acts.style.opacity = v ? Math.min(1, Math.abs(v) / 60) : 0; };
     card.addEventListener('pointerdown', e => { x0 = e.clientX; y0 = e.clientY; dx = 0; dragging = false; });
@@ -277,7 +375,7 @@ registerProcessor('jm-rec',R);`;
     card.addEventListener('pointerup', end); card.addEventListener('pointercancel', end);
     sw._close = () => { open = 0; set(0, true); };
     card.addEventListener('click', e => { if (dragging) { dragging = false; e.preventDefault(); return; } if (open) { sw._close(); return; } go('#/jam/' + encodeURIComponent(jam.id)); });
-    acts.addEventListener('click', e => { const b = e.target.closest('[data-a]'); if (!b) return; sw._close(); if (b.dataset.a === 'ren') askRename(jam, () => route()); else askDelete(jam, () => route()); });
+    acts.addEventListener('click', e => { const b = e.target.closest('[data-a]'); if (!b) return; sw._close(); if (b.dataset.a === 'ren') askRename(jam, () => route()); else if (b.dataset.a === 'lists') askLists(jam, () => route()); else askDelete(jam, () => route()); });
     card.style.touchAction = 'pan-y';
   }
 
@@ -623,11 +721,13 @@ registerProcessor('jm-rec',R);`;
       ${hasScore(jam) ? `<button class="btn" data-act="sync">🎚️ סנכרון השיר לתווים</button>` : ''}
       ${!jam.demo ? `<button class="btn" data-act="xml">📄 ${hasScore(jam) ? 'החלף' : 'הוסף'} תווים (PDF)</button>` : ''}
       <button class="btn" data-act="ren">✏️ שנה שם</button>
+      <button class="btn" data-act="lists">📋 הוסף לרשימה</button>
       <button class="btn ghost" data-act="del" style="color:var(--bad)">מחק את הג׳אם</button>
       <button class="btn ghost" data-close>סגור</button>`, async act => {
       if (act === 'sync') go('#/sync/' + encodeURIComponent(jam.id));
       if (act === 'del') askDelete(jam, () => go(''));
       if (act === 'ren') askRename(jam, () => route());
+      if (act === 'lists') askLists(jam);
       if (act === 'xml') pickFile('application/pdf,.pdf,.musicxml,.xml,.mxl', async f => {
         toast('קורא את התווים…', 1500);
         try { const sc = await readScoreFile(f, jam.instrument); jam.score = sc; jam.sync = null; await DB.put('jams', jam); toast('התווים נטענו: ' + sc.notes.length + ' תווים'); go('#/sync/' + encodeURIComponent(jam.id)); }
@@ -887,6 +987,7 @@ registerProcessor('jm-rec',R);`;
         if (st.pdf) await DB.put('blobs', st.pdf, `sheet:${id}:pdf`);
         await DB.put('jams', jam);
         if (st.decoded) bufCache[id] = st.decoded;
+        Lists.add(Lists.cur() ? Lists.cur().id : 'main', id);
         go(st.score ? '#/sync/' + encodeURIComponent(id) : '#/jam/' + encodeURIComponent(id));
       };
     }

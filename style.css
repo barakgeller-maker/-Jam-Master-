@@ -192,3 +192,13 @@ input[type=range]{flex:1;accent-color:var(--accent);height:30px}
 .choices.compact .choice small{display:none}
 .instpick{display:flex;align-items:center;gap:12px;margin-top:14px;border-color:var(--accent)}
 .instpick .e{font-size:32px}
+/* jam lists */
+.listtitle{display:flex;align-items:center;gap:8px;margin:22px 0 12px;font-size:22px;font-weight:800;color:var(--text);max-width:100%;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+.listtitle span{color:var(--accent);font-size:16px}
+.listrow{display:flex;align-items:center;gap:10px;width:100%;padding:14px 16px;border-radius:16px;background:var(--card2);margin-top:8px;text-align:start;color:var(--text);font-size:16px;font-weight:600;border:2px solid transparent;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+.listrow.on{border-color:var(--accent)}
+.listrow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.listrow .cnt{color:var(--muted);font-size:13px;font-weight:400}
+.listrow .ck{color:var(--accent)}
+.listrow .box{width:24px;height:24px;border-radius:7px;border:2px solid var(--dim);display:grid;place-items:center;color:#2a1600;font-weight:800;font-size:14px;flex:none}
+.listrow.on .box{background:var(--accent);border-color:var(--accent)}
