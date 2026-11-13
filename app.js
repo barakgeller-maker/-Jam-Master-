@@ -237,9 +237,10 @@ registerProcessor('jm-rec',R);`;
       <div class="top"><button class="iconbtn" id="back">→</button><h1>${esc(jam.name)}</h1><button class="iconbtn" id="menu">⋯</button></div>
       ${!score ? `<div class="warnbox">לג׳אם הזה אין עדיין תווים שהאפליקציה יודעת לקרוא, אז אפשר לנגן, להקליט ולשמוע את המיקס, אבל בלי בדיקת טעויות. כדי לקבל בדיקה, הוסף את ה-PDF של התווים דרך ⋯.</div>` :
         !synced || jam.sync.verified === false ? `<div class="warnbox">${!synced ? 'השיר עוד לא מסונכרן לתווים.' : 'הסנכרון של השיר הזה עוד לא אומת, ולכן הבדיקה עלולה לטעות.'} <a href="#/sync/${encodeURIComponent(jam.id)}" style="color:var(--accent);font-weight:700">סנכרן עכשיו (דקה)</a></div>` : ''}
-      <div class="card stage">
-        <div class="sec" id="sec">&nbsp;</div>
-        <div class="bar" id="bar">–</div><div class="barlbl" id="barlbl">${score ? 'תיבה' : ''}</div>
+      <div class="card stage${synced ? ' has-score' : ''}">
+        ${synced ? `<div class="stagetop"><div class="sec" id="sec">&nbsp;</div><div class="barmini"><span id="barlbl">תיבה</span> <b class="bar" id="bar">–</b></div></div>
+        <div class="score" id="score"></div>` : `<div class="sec" id="sec">&nbsp;</div>
+        <div class="bar" id="bar">–</div><div class="barlbl" id="barlbl">${score ? 'תיבה' : ''}</div>`}
         <div class="beats" id="beats"></div>
         <div class="cue" id="cue"><div class="big">מוכן?</div><div class="small">${score ? 'שים אוזניות, בחר קטע ולחץ הקלטה' : 'שים אוזניות ולחץ הקלטה'}</div></div>
         <div class="tuner" id="tuner" style="visibility:hidden"><div class="n" id="tExp"><small>צריך</small>–</div><div class="n" id="tYou"><small>אתה</small>–</div></div>
@@ -283,6 +284,13 @@ registerProcessor('jm-rec',R);`;
     }
     const dur = buf.duration;
     document.getElementById('tDur').textContent = fmt(dur);
+
+    // scrolling staff (falls back to the text cue if it can't be drawn)
+    let nt = null;
+    if (synced) {
+      try { nt = await window.Notation.render(document.getElementById('score'), jam, { ink: '#f4f1fb', dim: '#8d86ad' }); }
+      catch (e) { console.warn('notation', e); const sc = document.getElementById('score'); if (sc) sc.remove(); document.querySelector('.stage').classList.remove('has-score'); }
+    }
 
     // timeline
     const tl = document.getElementById('tl');
@@ -328,10 +336,17 @@ registerProcessor('jm-rec',R);`;
       const bi = Math.floor(mb.beat + 1e-6);
       [...beatsEl.children].forEach((el, i) => el.classList.toggle('on', b >= 0 && i === bi && run));
       // cue
-      const ns = score.notes; let cur = null, next = null;
-      for (const n of ns) { if (n.b <= b + 1e-6 && b < n.b + n.d) { cur = n; } if (n.b > b) { next = n; break; } }
+      const ns = score.notes; let cur = null, next = null, curIdx = -1;
+      for (let i = 0; i < ns.length; i++) { const n = ns[i]; if (n.b <= b + 1e-6 && b < n.b + n.d) { cur = n; curIdx = i; } if (n.b > b) { next = n; break; } }
+      if (nt) {
+        nt.seek(b);
+        let mk = '';
+        if (live !== null && cur) mk = live && live.midi != null && Math.abs(A.wrap12(live.midi - cur.c)) < 0.6 ? 'vf-ok' : 'vf-bad';
+        nt.mark(curIdx, mk);
+      }
       let html, cls;
-      if (cur) { const L = noteLabel(jam, cur); html = `<div class="big">נגן! ${L.solf}</div><div class="small ltr">${L.letter}</div>`; cls = 'play'; }
+      if (cur && nt) { html = `<div class="small">נגן</div>`; cls = 'play'; }
+      else if (cur) { const L = noteLabel(jam, cur); html = `<div class="big">נגן! ${L.solf}</div><div class="small ltr">${L.letter}</div>`; cls = 'play'; }
       else if (next) {
         const until = next.b - b; const L = noteLabel(jam, next);
         if (until <= meter * 2) { html = `<div class="big">${until <= meter ? Math.ceil(until) : 'מתכוננים'}</div><div class="small">הכניסה שלך: ${L.solf} <span class="ltr">${L.letter}</span></div>`; cls = 'wait'; }
