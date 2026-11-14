@@ -190,29 +190,24 @@
 
   // ---------- render ----------
   // jam: {score (concert), gen:{style, tempo, mutes}}; opts.maxBeats renders a preview
-  function render(score, gen, opts) {
-    opts = opts || {}; seed = 12345;
+  // the band as a list of timed one-shots: [{t (song seconds), s: sound descriptor, g: gain}]
+  function compose(score, gen, opts) {
+    opts = opts || {}; seed = 12345; const ev = [];
     const bpm = gen.tempo || score.tempo || 100, spb = 60 / bpm, swing = gen.style === 'jazz';
     const meter = Math.round(score.meter || 4) || 4;
     const offset = meter * spb; // one bar of count-in
     const key = gen.key || detectKey(score, 0);
     const chords = inferChords(score, key);
     const total = Math.min(score.totalBeats, opts.maxBeats || Infinity);
-    const len = Math.ceil((offset + total * spb + 2.5) * SR);
+    const dur = offset + total * spb + 2.5;
     const mutes = gen.mutes || { melody: true };
     const on = id => tracksFor(gen.style).includes(id) && !mutes[id];
-    // one buffer for everything (phones run out of memory with a buffer per instrument)
-    const mix = new Float32Array(len);
     const GAIN = { count: 0.8, drums: 0.9, bass: 1.0, piano: 0.9, guitar: 0.85, melody: 0.7 };
     const tAt = b => offset + b * spb;
     const sw = b => { const f = b - Math.floor(b); return swing && Math.abs(f - 0.5) < 1e-3 ? Math.floor(b) + 2 / 3 : b; };
-    function put(id, buf, b, gain, absT) {
-      const start = Math.round((absT != null ? absT : tAt(sw(b))) * SR); const out = mix; gain *= GAIN[id] || 1;
-      const end = Math.min(out.length, start + buf.length);
-      for (let i = Math.max(0, start); i < end; i++) out[i] += buf[i - start] * gain;
-    }
+    function put(id, desc, b, gain, absT) { ev.push({ t: absT != null ? absT : tAt(sw(b)), s: desc, g: gain * (GAIN[id] || 1) }); }
     // count-in sticks
-    if (!opts.noCount) for (let k = 0; k < meter; k++) put('count', DR.stick(), 0, k === 0 ? 0.9 : 0.6, k * spb);
+    if (!opts.noCount) for (let k = 0; k < meter; k++) put('count', P.DR.stick(), 0, k === 0 ? 0.9 : 0.6, k * spb);
     let prevV = null;
     for (let ci = 0; ci < chords.length; ci++) {
       const m = chords[ci]; if (m.start >= total) break;
@@ -224,24 +219,24 @@
         beats.forEach((b, k) => {
           const pos = k % 4, last = k === beats.length - 1;
           if (gen.style === 'jazz') {
-            put('drums', DR.ride(), b, acc(0.55, pos % 2 ? 1 : 0.85));
-            if (pos % 2 === 1) { put('drums', DR.ride(), b + 0.5, acc(0.38, 1)); put('drums', DR.pedal(), b, 0.6); }
-            if (pos === 0) put('drums', DR.kick(), b, 0.18);
+            put('drums', P.DR.ride(), b, acc(0.55, pos % 2 ? 1 : 0.85));
+            if (pos % 2 === 1) { put('drums', P.DR.ride(), b + 0.5, acc(0.38, 1)); put('drums', P.DR.pedal(), b, 0.6); }
+            if (pos === 0) put('drums', P.DR.kick(), b, 0.18);
           } else if (gen.style === 'pop') {
-            if (pos === 0 || pos === 2) put('drums', DR.kick(), b, acc(0.9, 1));
-            if (pos === 2 && rnd() < 0.3) put('drums', DR.kick(), b + 0.5, 0.6);
-            if (pos === 1 || pos === 3) put('drums', DR.snare(), b, acc(0.75, 1));
-            put('drums', DR.hat(), b, acc(0.75, 1)); put('drums', DR.hat(), b + 0.5, acc(0.5, 1));
-            if (last && ci % 8 === 7) { put('drums', DR.snare(), b + 0.5, 0.5); put('drums', DR.snare(), b + 0.75, 0.6); }
+            if (pos === 0 || pos === 2) put('drums', P.DR.kick(), b, acc(0.9, 1));
+            if (pos === 2 && rnd() < 0.3) put('drums', P.DR.kick(), b + 0.5, 0.6);
+            if (pos === 1 || pos === 3) put('drums', P.DR.snare(), b, acc(0.75, 1));
+            put('drums', P.DR.hat(), b, acc(0.75, 1)); put('drums', P.DR.hat(), b + 0.5, acc(0.5, 1));
+            if (last && ci % 8 === 7) { put('drums', P.DR.snare(), b + 0.5, 0.5); put('drums', P.DR.snare(), b + 0.75, 0.6); }
           } else if (gen.style === 'latin') {
-            if (pos === 0 || pos === 2) put('drums', DR.kick(), b, 0.6);
-            if (pos === 1 || pos === 3) put('drums', DR.kick(), b + 0.5, 0.45);
-            put('drums', DR.shaker(), b, acc(0.7, 1)); put('drums', DR.shaker(), b + 0.5, acc(0.45, 1));
+            if (pos === 0 || pos === 2) put('drums', P.DR.kick(), b, 0.6);
+            if (pos === 1 || pos === 3) put('drums', P.DR.kick(), b + 0.5, 0.45);
+            put('drums', P.DR.shaker(), b, acc(0.7, 1)); put('drums', P.DR.shaker(), b + 0.5, acc(0.45, 1));
             const bar2 = ci % 2 === 1, rims = bar2 ? [1, 2.5] : [0, 1.5, 3];
-            rims.forEach(r => { if (Math.floor(r) === k) put('drums', DR.rim(), m.start + r, 0.45); });
+            rims.forEach(r => { if (Math.floor(r) === k) put('drums', P.DR.rim(), m.start + r, 0.45); });
           } else {
-            put('drums', pos === 0 ? DR.clickHi() : DR.clickLo(), b, pos === 0 ? 0.8 : 0.55);
-            put('drums', DR.shaker(), b + 0.5, 0.25);
+            put('drums', pos === 0 ? P.DR.clickHi() : P.DR.clickLo(), b, pos === 0 ? 0.8 : 0.55);
+            put('drums', P.DR.shaker(), b + 0.5, 0.25);
           }
         });
       }
@@ -254,14 +249,14 @@
             let n;
             if (k === 0) n = R; else if (k === beats.length - 1 && beats.length > 1) n = nr + (rnd() < 0.5 ? 1 : -1);
             else n = [R, third, fifth, R + 12 > 50 ? R : R + 12, R + 2][Math.floor(rnd() * 5)];
-            put('bass', bass(n, spb * 0.95), b, acc(0.9, 1));
+            put('bass', P.bass(n, spb * 0.95), b, acc(0.9, 1));
           });
         } else if (gen.style === 'pop') {
-          beats.forEach((b, k) => { const pos = k % 4; const n = pos === 2 ? (rnd() < 0.5 ? fifth : R) : R; put('bass', bass(n, spb * (pos % 2 ? 0.45 : 0.8)), b, acc(0.85, 1)); if (pos % 2 === 1) put('bass', bass(R, spb * 0.4), b + 0.5, acc(0.6, 1)); });
+          beats.forEach((b, k) => { const pos = k % 4; const n = pos === 2 ? (rnd() < 0.5 ? fifth : R) : R; put('bass', P.bass(n, spb * (pos % 2 ? 0.45 : 0.8)), b, acc(0.85, 1)); if (pos % 2 === 1) put('bass', P.bass(R, spb * 0.4), b + 0.5, acc(0.6, 1)); });
         } else if (gen.style === 'latin') {
-          beats.forEach((b, k) => { const pos = k % 4; if (pos === 0) put('bass', bass(R, spb * 1.4), b, 0.9); if (pos === 1) put('bass', bass(fifth, spb * 0.45), b + 0.5, 0.75); if (pos === 2) put('bass', bass(fifth, spb * 1.4), b, 0.85); if (pos === 3) put('bass', bass(R, spb * 0.45), b + 0.5, 0.7); });
+          beats.forEach((b, k) => { const pos = k % 4; if (pos === 0) put('bass', P.bass(R, spb * 1.4), b, 0.9); if (pos === 1) put('bass', P.bass(fifth, spb * 0.45), b + 0.5, 0.75); if (pos === 2) put('bass', P.bass(fifth, spb * 1.4), b, 0.85); if (pos === 3) put('bass', P.bass(R, spb * 0.45), b + 0.5, 0.7); });
         } else {
-          put('bass', bass(R, spb * Math.min(L, 4) * 0.9), m.start, 0.8);
+          put('bass', P.bass(R, spb * Math.min(L, 4) * 0.9), m.start, 0.8);
         }
       }
       // comping
@@ -269,24 +264,38 @@
         const v = voicing(m, gen.style === 'jazz' ? 62 : 60, gen.style === 'jazz' || gen.style === 'latin', prevV); prevV = v;
         if (gen.style === 'jazz' && on('piano')) {
           const pats = [[[1.5, .5], [3, .6]], [[0, .9], [2.5, .4]], [[1, .5], [2.5, .5], [3.5, .4]], [[0.5, .5], [2, 1.2]]];
-          pats[Math.floor(rnd() * pats.length)].forEach(([o, d]) => { if (o < L - 1e-3) v.forEach((n, j) => put('piano', piano(n, d * spb), m.start + o, acc(0.32, j === 0 ? 1.1 : 1))); });
+          pats[Math.floor(rnd() * pats.length)].forEach(([o, d]) => { if (o < L - 1e-3) v.forEach((n, j) => put('piano', P.piano(n, d * spb), m.start + o, acc(0.32, j === 0 ? 1.1 : 1))); });
         } else if (on('guitar')) {
           const gtr = v.map(n => n - 12 < 52 ? n : n - 12).concat([v[0]]).sort((a, b) => a - b);
-          const strum = (b, d, gain, up) => { (up ? gtr.slice().reverse() : gtr).forEach((n, j) => put('guitar', pluck(n, d * spb, gen.style === 'pop'), 0, gain * (0.9 + 0.2 * rnd()), tAt(sw(b)) + j * (gen.style === 'pop' ? 0.011 : 0.018))); };
+          const strum = (b, d, gain, up) => { (up ? gtr.slice().reverse() : gtr).forEach((n, j) => put('guitar', P.pluck(n, d * spb, gen.style === 'pop'), 0, gain * (0.9 + 0.2 * rnd()), tAt(sw(b)) + j * (gen.style === 'pop' ? 0.011 : 0.018))); };
           if (gen.style === 'pop') beats.forEach((b, k) => { strum(b, 0.9, 0.42, false); if (k % 2 === 1) strum(b + 0.5, 0.45, 0.26, true); });
           else { const pat = ci % 2 ? [[0.5, .9], [2, .9], [3.5, .4]] : [[0, 1.4], [1.5, .9], [3, .9]]; pat.forEach(([o, d]) => { if (o < L - 1e-3) strum(m.start + o, d, 0.34, false); }); }
         } else if (on('piano')) {
-          v.forEach(n => put('piano', piano(n, Math.min(L, 4) * spb * 0.95), m.start, 0.3));
+          v.forEach(n => put('piano', P.piano(n, Math.min(L, 4) * spb * 0.95), m.start, 0.3));
         }
       }
     }
-    if (on('melody')) score.notes.forEach(n => { if (n.b < total) put('melody', lead(n.c, n.d * spb * 0.95), n.b, 0.8, tAt(n.b)); });
-    // mix + small room reverb
-    clearCache();
-    reverb(mix);
-    let peak = 0; for (let i = 0; i < len; i++) { const a = Math.abs(mix[i]); if (a > peak) peak = a; }
-    const norm = peak > 0 ? 0.85 / peak : 1; for (let i = 0; i < len; i++) mix[i] *= norm;
-    return { data: mix, sr: SR, offset, bpm, key, chords };
+    if (on('melody')) score.notes.forEach(n => { if (n.b < total) put('melody', P.lead(n.c, n.d * spb * 0.95), n.b, 0.8, tAt(n.b)); });
+    ev.sort((a, b) => a.t - b.t);
+    return { ev, dur, offset, bpm, key, chords };
+  }
+  const P = { piano: (m, d) => ['piano', m, d], bass: (m, d) => ['bass', m, d], pluck: (m, d, br) => ['pluck', m, d, br], lead: (m, d) => ['lead', m, d], DR: {} };
+  Object.keys(DR).forEach(k => { P.DR[k] = () => ['DR', k]; });
+  const REAL = { piano, bass, pluck, lead };
+  function sound(desc) { return desc[0] === 'DR' ? DR[desc[1]]() : REAL[desc[0]](desc[1], desc[2], desc[3]); }
+  const MASTER = 0.45;
+  // offline mix of [from, to) seconds (for exporting a take); memory = only that span
+  function render(score, gen, opts) {
+    opts = opts || {}; const c = compose(score, gen, opts);
+    const from = opts.from || 0, to = Math.min(opts.to || c.dur, c.dur), len = Math.max(1, Math.ceil((to - from) * SR)), mix = new Float32Array(len);
+    for (const e of c.ev) {
+      if (e.t >= to) break; if (e.t < from - 3) continue;
+      const buf = sound(e.s), start = Math.round((e.t - from) * SR), end = Math.min(len, start + buf.length), g = e.g * MASTER;
+      for (let i = Math.max(0, start); i < end; i++) mix[i] += buf[i - start] * g;
+    }
+    clearCache(); reverb(mix);
+    for (let i = 0; i < len; i++) mix[i] = Math.max(-1, Math.min(1, mix[i]));
+    return { data: mix, sr: SR, offset: c.offset, bpm: c.bpm, key: c.key, chords: c.chords };
   }
   function reverb(mix) { // in place
     const len = mix.length;
@@ -301,6 +310,67 @@
     }
   }
 
+  // ---------- live playback: one-shots scheduled ~1 s ahead, so memory stays flat for any song length ----------
+  function live(score, gen) {
+    const c = compose(score, gen);
+    return { isLive: true, duration: c.dur, offset: c.offset, key: c.key, source: ctx => new LiveSource(ctx, c.ev, c.dur) };
+  }
+  const ctxCache = new WeakMap(); // ctx -> {bufs: Map, bytes, verb}
+  function ctxStore(ctx) {
+    let st = ctxCache.get(ctx);
+    if (!st) { st = { bufs: new Map(), bytes: 0, verb: null }; ctxCache.set(ctx, st); }
+    return st;
+  }
+  function bufFor(ctx, desc) {
+    const st = ctxStore(ctx), k = desc.join(':'); let b = st.bufs.get(k);
+    if (!b) {
+      const d = sound(desc); b = ctx.createBuffer(1, d.length, SR);
+      if (b.copyToChannel) b.copyToChannel(d, 0); else b.getChannelData(0).set(d);
+      st.bufs.set(k, b); st.bytes += d.length * 4;
+      while (st.bytes > 12e6 && st.bufs.size > 1) { const k0 = st.bufs.keys().next().value; st.bytes -= st.bufs.get(k0).length * 4; st.bufs.delete(k0); }
+    } else { st.bufs.delete(k); st.bufs.set(k, b); } // most recently used last
+    return b;
+  }
+  function verbFor(ctx) {
+    const st = ctxStore(ctx); if (st.verb) return st.verb;
+    const sr = ctx.sampleRate, n = Math.floor(1.4 * sr), ir = ctx.createBuffer(2, n, sr);
+    for (let ch = 0; ch < 2; ch++) { const d = ir.getChannelData(ch); for (let i = 0; i < n; i++) d[i] = (rnd() * 2 - 1) * Math.pow(1 - i / n, 2.2) * Math.exp(-3 * i / n); }
+    return (st.verb = ir);
+  }
+  function LiveSource(ctx, ev, dur) {
+    this.ctx = ctx; this.ev = ev; this.dur = dur; this.onended = null; this.active = new Set(); this.timer = null; this.done = false;
+    this.out = ctx.createGain();
+    try { const cv = ctx.createConvolver(); cv.buffer = verbFor(ctx); const wet = ctx.createGain(); wet.gain.value = 0.12; this.out.connect(cv); cv.connect(wet); this.wet = wet; this.cv = cv; } catch (e) { this.wet = null; }
+  }
+  LiveSource.prototype.connect = function (dest) { this.out.connect(dest); if (this.wet) this.wet.connect(dest); return dest; };
+  LiveSource.prototype.start = function (when, offset, length) {
+    const ctx = this.ctx, ev = this.ev; offset = offset || 0;
+    const t0 = when - offset, end = Math.min(this.dur, length != null ? offset + length : this.dur);
+    let lo = 0, hi = ev.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (ev[mid].t < offset - 1e-3) lo = mid + 1; else hi = mid; }
+    let i = lo; const self = this;
+    const play = e => {
+      const src = ctx.createBufferSource(); src.buffer = bufFor(ctx, e.s);
+      const g = ctx.createGain(); g.gain.value = e.g * MASTER; src.connect(g); g.connect(self.out);
+      const at = Math.max(ctx.currentTime, t0 + e.t); const stopAt = t0 + end;
+      src.start(at); if (stopAt > at) src.stop(Math.min(stopAt, at + src.buffer.duration)); else src.stop(at);
+      self.active.add(src); src.onended = () => { self.active.delete(src); try { g.disconnect(); } catch (x) { } };
+    };
+    const offline = typeof OfflineAudioContext !== 'undefined' && ctx instanceof OfflineAudioContext;
+    if (offline) { for (; i < ev.length && ev[i].t < end; i++) play(ev[i]); return; }
+    const pump = () => {
+      if (self.done) return;
+      const songNow = ctx.currentTime - t0;
+      while (i < ev.length && ev[i].t < end && ev[i].t < songNow + 1.2) play(ev[i++]);
+      if (songNow >= end) { self.done = true; clearInterval(self.timer); if (self.onended) self.onended(); }
+    };
+    pump(); this.timer = setInterval(pump, 50);
+  };
+  LiveSource.prototype.stop = function () {
+    this.done = true; clearInterval(this.timer);
+    this.active.forEach(s => { try { s.onended = null; s.stop(); } catch (e) { } }); this.active.clear();
+    try { this.out.disconnect(); } catch (e) { } try { this.wet && this.wet.disconnect(); } catch (e) { }
+  };
+
   // shift the part to another key: concert pitches move, written names are respelled for the new key
   function transposeScore(score, shift, transpose, key) {
     const sc = JSON.parse(JSON.stringify(score)); if (!shift) return sc;
@@ -310,7 +380,7 @@
     return sc;
   }
 
-  g.Band = { STYLES, TRACKS, tracksFor, suggestStyle, detectKey, keyName, inferChords, render, transposeScore, mod12 };
+  g.Band = { STYLES, TRACKS, tracksFor, suggestStyle, detectKey, keyName, inferChords, render, compose, sound, live, clearCache, MASTER, SR, transposeScore, mod12 };
   // also runs as a Web Worker, so long songs render without freezing the page
   if (typeof document === 'undefined' && typeof g.postMessage === 'function') {
     g.onmessage = e => {

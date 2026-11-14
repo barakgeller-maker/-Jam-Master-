@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const M = window.Music, A = window.Analysis;
-  const APP_VERSION = '2026.11.14-band3';
+  const APP_VERSION = '2026.11.14-live';
   const $app = document.getElementById('app');
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = t => { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = Math.floor(t % 60); return m + ':' + String(s).padStart(2, '0'); };
@@ -104,35 +104,17 @@
     const meter = Math.round(jam.score.meter || 4) || 4, bpm = jam.gen.tempo || jam.score.tempo || 100;
     return { beatTimes: M.linearBeatTimes(meter * 60 / bpm, bpm, jam.score.totalBeats), verified: true, method: 'generated' };
   }
-  // render the virtual band off the main thread (falls back to the page if workers fail)
-  let bandWorker = null;
-  function renderBand(score, gen, opts) {
-    const local = () => new Promise(r => setTimeout(r, 30)).then(() => window.Band.render(score, gen, opts));
-    if (typeof Worker === 'undefined') return local();
-    return new Promise((res, rej) => {
-      try { if (!bandWorker) bandWorker = new Worker('band.js'); } catch (e) { local().then(res, rej); return; }
-      const w = bandWorker; let done = false;
-      const t = setTimeout(() => { if (done) return; done = true; try { w.terminate(); } catch (e) { } bandWorker = null; rej(new Error('הכנת ההרכב לקחה יותר מדי זמן')); }, 90000);
-      w.onmessage = e => { if (done) return; done = true; clearTimeout(t); if (e.data.ok) res(e.data); else rej(new Error(e.data.error)); };
-      w.onerror = e => { if (done) return; done = true; clearTimeout(t); try { w.terminate(); } catch (x) { } bandWorker = null; e.preventDefault && e.preventDefault(); local().then(res, rej); };
-      w.postMessage({ score, gen, opts: opts || null });
-    });
-  }
-  function toAudioBuffer(r) {
-    const c = ac(); let b;
-    try { b = c.createBuffer(1, r.data.length, r.sr); } catch (e) { // very old Safari: resample to the context rate
-      const k = c.sampleRate / r.sr, n = Math.floor(r.data.length * k), o = new Float32Array(n);
-      for (let i = 0; i < n; i++) { const x = i / k, j = Math.floor(x), f = x - j; o[i] = (r.data[j] || 0) * (1 - f) + (r.data[j + 1] || 0) * f; }
-      b = c.createBuffer(1, n, c.sampleRate); r = { data: o };
-    }
-    if (b.copyToChannel) b.copyToChannel(r.data, 0); else b.getChannelData(0).set(r.data);
-    return b;
+  // a playable source for either a real AudioBuffer or the live virtual band
+  function makeSource(c, buf) {
+    if (buf.isLive) return buf.source(c);
+    const s = c.createBufferSource(); s.buffer = buf; return s;
   }
   async function songBuffer(jam) {
     if (jam.gen) {
       const k = JSON.stringify(jam.gen); const c = bufCache[jam.id]; if (c && c._k === k) return c;
-      for (const x in bufCache) delete bufCache[x]; // free memory before rendering
-      const b = toAudioBuffer(await renderBand(jam.score, jam.gen)); b._k = k; return keepBuf(jam.id, b);
+      for (const x in bufCache) delete bufCache[x]; // free memory first
+      // the band is played live (scheduled a second ahead), never rendered whole: memory stays small on phones
+      const b = window.Band.live(jam.score, jam.gen); b._k = k; return keepBuf(jam.id, b);
     }
     if (bufCache[jam.id]) return bufCache[jam.id];
     let ab;
@@ -609,7 +591,7 @@ registerProcessor('jm-rec',R);`;
       if (section && synced && fromT == null) { S = Math.max(0, bm.toTime(section.from - meter)); endT = Math.min(dur, bm.toTime(section.to) + 0.4); }
       if (opts.endT) endT = opts.endT;
       if (S >= dur - 0.5) S = 0;
-      const src = c.createBufferSource(); src.buffer = buf; src.connect(c.destination);
+      const src = makeSource(c, buf); src.connect(c.destination);
       const T0 = c.currentTime + 0.12;
       if (mode === 'record') { if (mic.ctx !== c) { await ensureMic(); } micStart(); }
       src.start(T0, S);
@@ -913,7 +895,7 @@ registerProcessor('jm-rec',R);`;
     function playFrom(t) {
       if (c.state !== "running") { try { c.resume(); } catch (e) { } }
       stopPb(); const T = c.currentTime + 0.08;
-      const s1 = c.createBufferSource(); s1.buffer = songBuf; s1.connect(gSong); s1.start(T, t, Math.max(0.01, B0 - t));
+      const s1 = makeSource(c, songBuf); s1.connect(gSong); s1.start(T, t, Math.max(0.01, B0 - t));
       const s2 = c.createBufferSource(); s2.buffer = recBuf; s2.connect(gMe);
       const off = t - take.songTime0; if (off >= 0) { if (off < recBuf.duration) s2.start(T, off); } else s2.start(T - off, 0);
       pb = { s1, s2, T, t }; bPlay.textContent = '❚❚';
@@ -934,7 +916,7 @@ registerProcessor('jm-rec',R);`;
         const sr = 44100; const oc = new OfflineAudioContext(1, Math.ceil(len * sr), sr);
         const g1 = oc.createGain(); g1.gain.value = +vS.value; g1.connect(oc.destination);
         const g2 = oc.createGain(); g2.gain.value = +vM.value; g2.connect(oc.destination);
-        const a = oc.createBufferSource(); a.buffer = songBuf; a.connect(g1); a.start(0, A0, len);
+        const a = makeSource(oc, songBuf); a.connect(g1); a.start(0, A0, len);
         const b = oc.createBufferSource(); b.buffer = recBuf; b.connect(g2); const off = A0 - take.songTime0; if (off >= 0) b.start(0, off); else b.start(-off, 0);
         const out = await oc.startRendering();
         const blob = wav(out.getChannelData(0), sr);
@@ -1055,13 +1037,12 @@ registerProcessor('jm-rec',R);`;
           pv.textContent = 'מכין…'; await new Promise(r => setTimeout(r, 30));
           const { k0, k } = bandKey(); const sc = window.Band.transposeScore(concertScore(), st.gen.shift, M.instrument(st.instrument).transpose, k0);
           const first = sc.notes.length ? Math.max(0, sc.measureStart.filter(x => x <= sc.notes[0].b).pop() || 0) : 0;
-          let r; try { r = await renderBand(sc, { style: st.gen.style, tempo: st.gen.tempo, key: k, mutes: {} }, { maxBeats: first + 32 }); }
+          let lb; try { lb = window.Band.live(sc, { style: st.gen.style, tempo: st.gen.tempo, key: k, mutes: {} }); }
           catch (e) { pv.textContent = '▶ שמע דוגמה'; toast('לא הצלחתי להכין דוגמה: ' + (e.message || e), 5000); return; }
           if (S() !== 'band' || !document.body.contains(pv)) return;
-          const c = await readyAudio(); const b = toAudioBuffer(r);
-          const src = c.createBufferSource(); src.buffer = b; src.connect(c.destination);
-          const from = first ? r.offset + first * 60 / st.gen.tempo - (Math.round(sc.meter || 4) * 60 / st.gen.tempo) : 0;
-          src.start(0, Math.max(0, from), Math.min(20, b.duration - from)); preview = src; pv.textContent = '■ עצור';
+          const c = await readyAudio(); const src = lb.source(c); src.connect(c.destination);
+          const from = first ? lb.offset + first * 60 / st.gen.tempo - (Math.round(sc.meter || 4) * 60 / st.gen.tempo) : 0;
+          src.start(c.currentTime + 0.05, Math.max(0, from), Math.min(20, lb.duration - from)); preview = src; pv.textContent = '■ עצור';
           src.onended = () => { if (preview === src) { preview = null; pv.textContent = '▶ שמע דוגמה'; } };
         };
       }
@@ -1126,7 +1107,7 @@ registerProcessor('jm-rec',R);`;
     cleanup = stopAll;
     const now = () => c.currentTime - T0 - outLatency();
     function play(from, withClicks) {
-      stopAll(); src = c.createBufferSource(); src.buffer = buf; src.connect(c.destination);
+      stopAll(); src = makeSource(c, buf); src.connect(c.destination);
       T0 = c.currentTime + 0.1 - (from || 0); src.start(c.currentTime + 0.1, from || 0);
       playBtn.textContent = '■ עצור';
       if (withClicks && result) scheduleClicks(from || 0);
