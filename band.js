@@ -193,13 +193,15 @@
     const chords = inferChords(score, key);
     const total = Math.min(score.totalBeats, opts.maxBeats || Infinity);
     const len = Math.ceil((offset + total * spb + 2.5) * SR);
-    const tracks = {}; const mutes = gen.mutes || { melody: true };
+    const mutes = gen.mutes || { melody: true };
     const on = id => tracksFor(gen.style).includes(id) && !mutes[id];
-    const T = id => tracks[id] || (tracks[id] = new Float32Array(len));
+    // one buffer for everything (phones run out of memory with a buffer per instrument)
+    const mix = new Float32Array(len);
+    const GAIN = { count: 0.8, drums: 0.9, bass: 1.0, piano: 0.9, guitar: 0.85, melody: 0.7 };
     const tAt = b => offset + b * spb;
     const sw = b => { const f = b - Math.floor(b); return swing && Math.abs(f - 0.5) < 1e-3 ? Math.floor(b) + 2 / 3 : b; };
     function put(id, buf, b, gain, absT) {
-      const start = Math.round((absT != null ? absT : tAt(sw(b))) * SR); const out = T(id);
+      const start = Math.round((absT != null ? absT : tAt(sw(b))) * SR); const out = mix; gain *= GAIN[id] || 1;
       const end = Math.min(out.length, start + buf.length);
       for (let i = Math.max(0, start); i < end; i++) out[i] += buf[i - start] * gain;
     }
@@ -274,16 +276,13 @@
     }
     if (on('melody')) score.notes.forEach(n => { if (n.b < total) put('melody', lead(n.c, n.d * spb * 0.95), n.b, 0.8, tAt(n.b)); });
     // mix + small room reverb
-    const mix = new Float32Array(len);
-    const gains = { count: 0.8, drums: 0.9, bass: 1.0, piano: 0.9, guitar: 0.85, melody: 0.7 };
-    for (const id in tracks) { const t = tracks[id], gn = gains[id] || 1; for (let i = 0; i < len; i++) mix[i] += t[i] * gn; }
-    const wet = reverb(mix, tracks);
-    let peak = 0; for (let i = 0; i < len; i++) { mix[i] += wet[i]; const a = Math.abs(mix[i]); if (a > peak) peak = a; }
+    reverb(mix);
+    let peak = 0; for (let i = 0; i < len; i++) { const a = Math.abs(mix[i]); if (a > peak) peak = a; }
     const norm = peak > 0 ? 0.85 / peak : 1; for (let i = 0; i < len; i++) mix[i] *= norm;
     return { data: mix, sr: SR, offset, bpm, key, chords };
   }
-  function reverb(mix) {
-    const len = mix.length, out = new Float32Array(len);
+  function reverb(mix) { // in place
+    const len = mix.length;
     const combs = [1116, 1188, 1277, 1356].map(d => ({ d: Math.round(d * SR / 44100), buf: null, p: 0, lp: 0 }));
     combs.forEach(c => c.buf = new Float32Array(c.d));
     const aps = [556, 441].map(d => ({ d: Math.round(d * SR / 44100), buf: null, p: 0 })); aps.forEach(a => a.buf = new Float32Array(a.d));
@@ -291,9 +290,8 @@
       const x = mix[i] * 0.06; let s = 0;
       for (const c of combs) { const y = c.buf[c.p]; c.lp = y * 0.6 + c.lp * 0.4; c.buf[c.p] = x + c.lp * 0.78; c.p = (c.p + 1) % c.d; s += y; }
       for (const a of aps) { const b = a.buf[a.p]; const y = -s + b; a.buf[a.p] = s + b * 0.5; a.p = (a.p + 1) % a.d; s = y; }
-      out[i] = s;
+      mix[i] += s;
     }
-    return out;
   }
 
   // shift the part to another key: concert pitches move, written names are respelled for the new key
@@ -306,4 +304,11 @@
   }
 
   g.Band = { STYLES, TRACKS, tracksFor, suggestStyle, detectKey, keyName, inferChords, render, transposeScore, mod12 };
-})(window);
+  // also runs as a Web Worker, so long songs render without freezing the page
+  if (typeof document === 'undefined' && typeof g.postMessage === 'function') {
+    g.onmessage = e => {
+      try { const r = render(e.data.score, e.data.gen, e.data.opts); g.postMessage({ ok: true, data: r.data, sr: r.sr, offset: r.offset }, [r.data.buffer]); }
+      catch (err) { g.postMessage({ ok: false, error: String(err && err.message || err) }); }
+    };
+  }
+})(typeof window !== 'undefined' ? window : self);

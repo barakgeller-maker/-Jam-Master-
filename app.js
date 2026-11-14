@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const M = window.Music, A = window.Analysis;
-  const APP_VERSION = '2026.11.14-band';
+  const APP_VERSION = '2026.11.14-band2';
   const $app = document.getElementById('app');
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = t => { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = Math.floor(t % 60); return m + ':' + String(s).padStart(2, '0'); };
@@ -102,12 +102,35 @@
     const meter = Math.round(jam.score.meter || 4) || 4, bpm = jam.gen.tempo || jam.score.tempo || 100;
     return { beatTimes: M.linearBeatTimes(meter * 60 / bpm, bpm, jam.score.totalBeats), verified: true, method: 'generated' };
   }
+  // render the virtual band off the main thread (falls back to the page if workers fail)
+  let bandWorker = null;
+  function renderBand(score, gen, opts) {
+    const local = () => new Promise(r => setTimeout(r, 30)).then(() => window.Band.render(score, gen, opts));
+    if (typeof Worker === 'undefined') return local();
+    return new Promise((res, rej) => {
+      try { if (!bandWorker) bandWorker = new Worker('band.js'); } catch (e) { local().then(res, rej); return; }
+      const w = bandWorker; let done = false;
+      const t = setTimeout(() => { if (done) return; done = true; try { w.terminate(); } catch (e) { } bandWorker = null; rej(new Error('הכנת ההרכב לקחה יותר מדי זמן')); }, 90000);
+      w.onmessage = e => { if (done) return; done = true; clearTimeout(t); if (e.data.ok) res(e.data); else rej(new Error(e.data.error)); };
+      w.onerror = e => { if (done) return; done = true; clearTimeout(t); try { w.terminate(); } catch (x) { } bandWorker = null; e.preventDefault && e.preventDefault(); local().then(res, rej); };
+      w.postMessage({ score, gen, opts: opts || null });
+    });
+  }
+  function toAudioBuffer(r) {
+    const c = ac(); let b;
+    try { b = c.createBuffer(1, r.data.length, r.sr); } catch (e) { // very old Safari: resample to the context rate
+      const k = c.sampleRate / r.sr, n = Math.floor(r.data.length * k), o = new Float32Array(n);
+      for (let i = 0; i < n; i++) { const x = i / k, j = Math.floor(x), f = x - j; o[i] = (r.data[j] || 0) * (1 - f) + (r.data[j + 1] || 0) * f; }
+      b = c.createBuffer(1, n, c.sampleRate); r = { data: o };
+    }
+    if (b.copyToChannel) b.copyToChannel(r.data, 0); else b.getChannelData(0).set(r.data);
+    return b;
+  }
   async function songBuffer(jam) {
     if (jam.gen) {
       const k = JSON.stringify(jam.gen); const c = bufCache[jam.id]; if (c && c._k === k) return c;
-      await new Promise(r => setTimeout(r, 30)); // let the spinner paint
-      const r = window.Band.render(jam.score, jam.gen);
-      const b = ac().createBuffer(1, r.data.length, r.sr); b.copyToChannel(r.data, 0); b._k = k; bufCache[jam.id] = b; return b;
+      bufCache[jam.id] = null;
+      const b = toAudioBuffer(await renderBand(jam.score, jam.gen)); b._k = k; bufCache[jam.id] = b; return b;
     }
     if (bufCache[jam.id]) return bufCache[jam.id];
     let ab;
@@ -449,7 +472,7 @@ registerProcessor('jm-rec',R);`;
 
     // load audio
     const ctl = document.getElementById('ctl');
-    ctl.innerHTML = `<div class="spinner"></div>`;
+    ctl.innerHTML = jam.gen ? `<div style="text-align:center;width:100%"><div class="spinner"></div><div class="hint">ההרכב מתכונן לנגן… (כמה שניות)</div></div>` : `<div class="spinner"></div>`;
     let buf;
     try { buf = await songBuffer(jam); } catch (e) {
       if (e.message === 'needAudio') {
@@ -464,7 +487,7 @@ registerProcessor('jm-rec',R);`;
         });
         return;
       }
-      ctl.innerHTML = `<div class="errbox">לא הצלחתי לפתוח את קובץ השיר (${esc(e.message || e)}).</div>`; return;
+      ctl.innerHTML = `<div class="errbox">${jam.gen ? 'לא הצלחתי להכין את ההרכב' : 'לא הצלחתי לפתוח את קובץ השיר'} (${esc(e.message || e)}).</div>`; return;
     }
     if (!document.body.contains(ctl)) return; // a newer page replaced this one while the song loaded
     const dur = buf.duration;
@@ -1030,11 +1053,13 @@ registerProcessor('jm-rec',R);`;
           pv.textContent = 'מכין…'; await new Promise(r => setTimeout(r, 30));
           const { k0, k } = bandKey(); const sc = window.Band.transposeScore(concertScore(), st.gen.shift, M.instrument(st.instrument).transpose, k0);
           const first = sc.notes.length ? Math.max(0, sc.measureStart.filter(x => x <= sc.notes[0].b).pop() || 0) : 0;
-          const r = window.Band.render(sc, { style: st.gen.style, tempo: st.gen.tempo, key: k, mutes: {} }, { maxBeats: first + 32 });
-          const c = await readyAudio(); const b = c.createBuffer(1, r.data.length, r.sr); b.copyToChannel(r.data, 0);
+          let r; try { r = await renderBand(sc, { style: st.gen.style, tempo: st.gen.tempo, key: k, mutes: {} }, { maxBeats: first + 32 }); }
+          catch (e) { pv.textContent = '▶ שמע דוגמה'; toast('לא הצלחתי להכין דוגמה: ' + (e.message || e), 5000); return; }
+          if (S() !== 'band' || !document.body.contains(pv)) return;
+          const c = await readyAudio(); const b = toAudioBuffer(r);
           const src = c.createBufferSource(); src.buffer = b; src.connect(c.destination);
           const from = first ? r.offset + first * 60 / st.gen.tempo - (Math.round(sc.meter || 4) * 60 / st.gen.tempo) : 0;
-          src.start(0, Math.max(0, from), Math.min(20, r.data.length / r.sr - from)); preview = src; pv.textContent = '■ עצור';
+          src.start(0, Math.max(0, from), Math.min(20, b.duration - from)); preview = src; pv.textContent = '■ עצור';
           src.onended = () => { if (preview === src) { preview = null; pv.textContent = '▶ שמע דוגמה'; } };
         };
       }
@@ -1055,23 +1080,26 @@ registerProcessor('jm-rec',R);`;
       next.onclick = async () => {
         if (S() !== 'final') { st.step++; render(); return; }
         next.disabled = true; next.textContent = 'שומר…';
-        const id = 'j' + Date.now();
-        // the sheet was read at written pitch; now that the instrument is known, store concert pitch
-        if (st.score && st.scoreFile) { try { st.score = await readScoreFile(st.scoreFile, st.instrument); } catch (e) { } }
-        else if (st.score) { const tr = M.instrument(st.instrument).transpose; st.score.notes.forEach(n => { n.c -= tr; }); st.score.namesFor = st.instrument; }
-        const jam = { id, name: autoName(), instrument: st.instrument, created: Date.now(), score: st.score, sync: null };
-        if (st.gen && st.score) {
-          const B = window.Band, tr = M.instrument(st.instrument).transpose, k0 = B.detectKey(st.score, tr);
-          jam.score = B.transposeScore(st.score, st.gen.shift, tr, k0);
-          jam.gen = { style: st.gen.style, tempo: st.gen.tempo, shift: st.gen.shift, key: { tonic: B.mod12(k0.tonic + st.gen.shift), mode: k0.mode }, mutes: { melody: true } };
-          jam.sync = genSync(jam);
-        } else await DB.put('blobs', st.audio, 'audio:' + id);
-        for (let i = 0; i < st.sheetImages.length; i++) await DB.put('blobs', st.sheetImages[i], `sheet:${id}:${i}`);
-        if (st.pdf) await DB.put('blobs', st.pdf, `sheet:${id}:pdf`);
-        await DB.put('jams', jam);
-        if (st.decoded) bufCache[id] = st.decoded;
-        Lists.add(Lists.cur() ? Lists.cur().id : 'main', id);
-        go(st.score && !st.gen ? '#/sync/' + encodeURIComponent(id) : '#/jam/' + encodeURIComponent(id));
+        try {
+          const id = 'j' + Date.now();
+          // the sheet was read at written pitch; now that the instrument is known, store concert pitch
+          let score = st.score;
+          if (st.score && st.scoreFile) { try { score = await readScoreFile(st.scoreFile, st.instrument); } catch (e) { } }
+          else if (st.score) { score = concertScore(); score.namesFor = st.instrument; }
+          const jam = { id, name: autoName(), instrument: st.instrument, created: Date.now(), score, sync: null };
+          if (st.gen && score) {
+            const B = window.Band, tr = M.instrument(st.instrument).transpose, k0 = B.detectKey(score, tr);
+            jam.score = B.transposeScore(score, st.gen.shift, tr, k0);
+            jam.gen = { style: st.gen.style, tempo: st.gen.tempo, shift: st.gen.shift, key: { tonic: B.mod12(k0.tonic + st.gen.shift), mode: k0.mode }, mutes: { melody: true } };
+            jam.sync = genSync(jam);
+          } else await DB.put('blobs', st.audio, 'audio:' + id);
+          for (let i = 0; i < st.sheetImages.length; i++) await DB.put('blobs', st.sheetImages[i], `sheet:${id}:${i}`);
+          if (st.pdf) await DB.put('blobs', st.pdf, `sheet:${id}:pdf`);
+          await DB.put('jams', jam);
+          if (st.decoded) bufCache[id] = st.decoded;
+          Lists.add(Lists.cur() ? Lists.cur().id : 'main', id);
+          go(st.score && !st.gen ? '#/sync/' + encodeURIComponent(id) : '#/jam/' + encodeURIComponent(id));
+        } catch (e) { console.error(e); next.disabled = false; next.textContent = 'נסה שוב'; toast('משהו נתקע ביצירת הג׳אם: ' + (e.message || e), 6000); }
       };
     }
     render();
