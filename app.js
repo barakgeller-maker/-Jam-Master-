@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const M = window.Music, A = window.Analysis;
-  const APP_VERSION = '2026.11.14-fix5';
+  const APP_VERSION = '2026.11.14-edit';
   // ---------- on-device diagnostics: a breadcrumb trail saved before each risky step, so a crash leaves a trace ----------
   const Diag = {
     K: 'jm.diag',
@@ -785,7 +785,11 @@ registerProcessor('jm-rec',R);`;
       const base = jam.score.tempo || 100, mutes = gen.mutes || {};
       const el = document.getElementById('bandc');
       el.innerHTML = `<div class="bandhead"><span class="e">${st.e}</span><div style="flex:1"><b>ההרכב: ${esc(st.name)}</b><div class="sub">${gen.key ? esc(B.keyName(gen.key.tonic, gen.key.mode)) : ''}</div></div></div>
-        <div class="slider"><label>טמפו <b class="ltr" id="bpmv">${gen.tempo}</b></label><input type="range" id="bpm" min="${Math.round(base * 0.25) * 2}" max="${Math.round(base * 0.625) * 2}" step="2" value="${gen.tempo}"></div>
+        <div class="sub" style="margin-top:6px">סגנון</div>
+        <div class="stylechips">${B.STYLES.map(x => `<button class="trk ${x.id === gen.style ? 'on sel' : ''}" data-st="${x.id}"><span>${x.e}</span>${esc(x.name)}</button>`).join('')}</div>
+        <div class="sub" style="margin-top:12px">סולם</div>
+        <div class="keys">${(() => { const orig = B.mod12(gen.key.tonic - (gen.shift || 0)); return Array.from({ length: 12 }, (_, pc) => { let sh = B.mod12(pc - orig); if (sh > 6) sh -= 12; return `<button class="kchip ${sh === (gen.shift || 0) ? 'on' : ''}" data-sh="${sh}">${esc(B.keyName(pc, gen.key.mode, { letter: true }))}${sh === 0 ? '<i></i>' : ''}</button>`; }).join(''); })()}</div>
+        <div class="slider" style="margin-top:10px"><label>טמפו <b class="ltr" id="bpmv">${gen.tempo}</b></label><input type="range" id="bpm" min="${Math.round(base * 0.25) * 2}" max="${Math.round(base * 0.625) * 2}" step="2" value="${gen.tempo}"></div>
         <div class="hint" id="bpmh" style="margin-top:-4px">${Math.round(100 * gen.tempo / base)}% מהמקור · מתחילים לאט ומאיצים</div>
         <div class="tracks">${B.tracksFor(gen.style).map(t => `<button class="trk ${mutes[t] ? '' : 'on'}" data-t="${t}"><span>${B.TRACKS[t].e}</span>${esc(B.TRACKS[t].name)}</button>`).join('')}</div>`;
       const apply = async () => {
@@ -795,7 +799,15 @@ registerProcessor('jm-rec',R);`;
       const r = document.getElementById('bpm');
       r.oninput = () => { document.getElementById('bpmv').textContent = r.value; document.getElementById('bpmh').textContent = `${Math.round(100 * r.value / base)}% מהמקור · מתחילים לאט ומאיצים`; };
       r.onchange = () => { gen.tempo = +r.value; apply(); };
-      el.querySelectorAll('.trk').forEach(b => b.onclick = () => { const t = b.dataset.t; gen.mutes = { ...(gen.mutes || {}), [t]: !(gen.mutes || {})[t] }; apply(); });
+      el.querySelectorAll('[data-st]').forEach(b => b.onclick = () => { if (b.dataset.st === gen.style) return; gen.style = b.dataset.st; apply(); });
+      el.querySelectorAll('.kchip').forEach(b => b.onclick = () => {
+        const sh = +b.dataset.sh, d = sh - (gen.shift || 0); if (!d) return;
+        if (run) { toast('קודם עצור את הנגינה'); return; }
+        const tr = M.instrument(jam.instrument).transpose;
+        jam.score = B.transposeScore(jam.score, d, tr, gen.key); jam.score.namesFor = jam.instrument;
+        gen.key = { tonic: B.mod12(gen.key.tonic + d), mode: gen.key.mode }; gen.shift = sh; apply();
+      });
+      el.querySelectorAll('.trk[data-t]').forEach(b => b.onclick = () => { const t = b.dataset.t; gen.mutes = { ...(gen.mutes || {}), [t]: !(gen.mutes || {})[t] }; apply(); });
     }
   }
 
