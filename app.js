@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const M = window.Music, A = window.Analysis;
-  const APP_VERSION = '2026.11.14-edit';
+  const APP_VERSION = '2026.11.14-slow';
   // ---------- on-device diagnostics: a breadcrumb trail saved before each risky step, so a crash leaves a trace ----------
   const Diag = {
     K: 'jm.diag',
@@ -789,7 +789,7 @@ registerProcessor('jm-rec',R);`;
         <div class="stylechips">${B.STYLES.map(x => `<button class="trk ${x.id === gen.style ? 'on sel' : ''}" data-st="${x.id}"><span>${x.e}</span>${esc(x.name)}</button>`).join('')}</div>
         <div class="sub" style="margin-top:12px">סולם</div>
         <div class="keys">${(() => { const orig = B.mod12(gen.key.tonic - (gen.shift || 0)); return Array.from({ length: 12 }, (_, pc) => { let sh = B.mod12(pc - orig); if (sh > 6) sh -= 12; return `<button class="kchip ${sh === (gen.shift || 0) ? 'on' : ''}" data-sh="${sh}">${esc(B.keyName(pc, gen.key.mode, { letter: true }))}${sh === 0 ? '<i></i>' : ''}</button>`; }).join(''); })()}</div>
-        <div class="slider" style="margin-top:10px"><label>טמפו <b class="ltr" id="bpmv">${gen.tempo}</b></label><input type="range" id="bpm" min="${Math.round(base * 0.25) * 2}" max="${Math.round(base * 0.625) * 2}" step="2" value="${gen.tempo}"></div>
+        <div class="slider" style="margin-top:10px"><label>טמפו <b class="ltr" id="bpmv">${gen.tempo}</b></label><input type="range" id="bpm" min="30" max="${Math.max(100, Math.round(base * 0.625) * 2)}" step="2" value="${gen.tempo}"></div>
         <div class="hint" id="bpmh" style="margin-top:-4px">${Math.round(100 * gen.tempo / base)}% מהמקור · מתחילים לאט ומאיצים</div>
         <div class="tracks">${B.tracksFor(gen.style).map(t => `<button class="trk ${mutes[t] ? '' : 'on'}" data-t="${t}"><span>${B.TRACKS[t].e}</span>${esc(B.TRACKS[t].name)}</button>`).join('')}</div>`;
       const apply = async () => {
@@ -1037,7 +1037,7 @@ registerProcessor('jm-rec',R);`;
           <div class="sub">${st.gen.shift ? `הזזתי ${Math.abs(st.gen.shift)} חצאי טון ${st.gen.shift > 0 ? 'למעלה' : 'למטה'} מהמקור. גם התווים על המסך יעברו לסולם הזה.` : 'זה הסולם שזיהיתי בתווים.'} ${tr ? `בכתב של ${esc(M.instrument(st.instrument).name)}: ${esc(B.keyName(B.mod12(k.tonic + tr), k.mode))}.` : ''}</div>
           <div class="keys">${keys.map(x => `<button class="kchip ${x.sh === st.gen.shift ? 'on' : ''}" data-sh="${x.sh}">${esc(B.keyName(x.pc, k0.mode, { letter: true }))}${x.sh === 0 ? '<i></i>' : ''}</button>`).join('')}</div></div>
         <div class="h2" style="margin-top:6px">טמפו</div>
-        <div class="card"><div class="slider"><label class="ltr"><b id="tv">${st.gen.tempo}</b> BPM</label><input type="range" id="tempo" min="40" max="240" step="2" value="${st.gen.tempo}"></div><div class="hint">בתווים: ${st.score.tempo || '?'} · אפשר לשנות גם אחר כך במסך התרגול</div></div>
+        <div class="card"><div class="slider"><label class="ltr"><b id="tv">${st.gen.tempo}</b> BPM</label><input type="range" id="tempo" min="30" max="240" step="2" value="${st.gen.tempo}"></div><div class="hint">בתווים: ${st.score.tempo || '?'} · אפשר לשנות גם אחר כך במסך התרגול</div></div>
         <button class="btn" id="prev">▶ שמע דוגמה</button>
         <button class="btn primary" id="next">המשך</button>`;
       }
