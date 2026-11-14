@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const M = window.Music, A = window.Analysis;
-  const APP_VERSION = '2026.11.14-band2';
+  const APP_VERSION = '2026.11.14-band3';
   const $app = document.getElementById('app');
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = t => { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = Math.floor(t % 60); return m + ':' + String(s).padStart(2, '0'); };
@@ -97,7 +97,9 @@
     try { ctx && ctx.close(); } catch (e) { }
     ctx = null; return ac();
   }
+  // keep only the last song in memory: phones run out of memory with several decoded songs
   const bufCache = {};
+  function keepBuf(id, b) { for (const k in bufCache) if (k !== id) delete bufCache[k]; bufCache[id] = b; return b; }
   function genSync(jam) {
     const meter = Math.round(jam.score.meter || 4) || 4, bpm = jam.gen.tempo || jam.score.tempo || 100;
     return { beatTimes: M.linearBeatTimes(meter * 60 / bpm, bpm, jam.score.totalBeats), verified: true, method: 'generated' };
@@ -129,15 +131,15 @@
   async function songBuffer(jam) {
     if (jam.gen) {
       const k = JSON.stringify(jam.gen); const c = bufCache[jam.id]; if (c && c._k === k) return c;
-      bufCache[jam.id] = null;
-      const b = toAudioBuffer(await renderBand(jam.score, jam.gen)); b._k = k; bufCache[jam.id] = b; return b;
+      for (const x in bufCache) delete bufCache[x]; // free memory before rendering
+      const b = toAudioBuffer(await renderBand(jam.score, jam.gen)); b._k = k; return keepBuf(jam.id, b);
     }
     if (bufCache[jam.id]) return bufCache[jam.id];
     let ab;
     if (jam.demo && jam.audio) ab = await (await fetch(jam.audio)).arrayBuffer();
     else { const blob = await DB.get('blobs', 'audio:' + jam.id); if (!blob) throw new Error('needAudio'); ab = await blob.arrayBuffer(); }
     const buf = await new Promise((res, rej) => { const p = ac().decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej); });
-    bufCache[jam.id] = buf; return buf;
+    return keepBuf(jam.id, buf);
   }
   function outLatency() { const c = ac(); return (c.outputLatency || 0) + (c.baseLatency || 0) || 0.03; }
 
@@ -482,7 +484,7 @@ registerProcessor('jm-rec',R);`;
             const ab = await f.arrayBuffer();
             const b = await new Promise((res, rej) => { const p = ac().decodeAudioData(ab.slice(0), res, rej); if (p && p.then) p.then(res, rej); });
             if (jam.audioDuration && Math.abs(b.duration - jam.audioDuration) > 3) { toast(`הקובץ הזה באורך ${fmt(b.duration)}, אבל השיר צריך להיות ${fmt(jam.audioDuration)}. ודא שבחרת את הקובץ הנכון.`, 5000); return; }
-            await DB.put('blobs', f, 'audio:' + jam.id); bufCache[jam.id] = b; route();
+            await DB.put('blobs', f, 'audio:' + jam.id); keepBuf(jam.id, b); route();
           } catch (err) { toast('לא הצלחתי לפתוח את קובץ השמע הזה'); }
         });
         return;
@@ -1096,7 +1098,7 @@ registerProcessor('jm-rec',R);`;
           for (let i = 0; i < st.sheetImages.length; i++) await DB.put('blobs', st.sheetImages[i], `sheet:${id}:${i}`);
           if (st.pdf) await DB.put('blobs', st.pdf, `sheet:${id}:pdf`);
           await DB.put('jams', jam);
-          if (st.decoded) bufCache[id] = st.decoded;
+          if (st.decoded) keepBuf(id, st.decoded);
           Lists.add(Lists.cur() ? Lists.cur().id : 'main', id);
           go(st.score && !st.gen ? '#/sync/' + encodeURIComponent(id) : '#/jam/' + encodeURIComponent(id));
         } catch (e) { console.error(e); next.disabled = false; next.textContent = 'נסה שוב'; toast('משהו נתקע ביצירת הג׳אם: ' + (e.message || e), 6000); }

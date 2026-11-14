@@ -3,7 +3,7 @@
 // with small synthesized instruments, straight into a Float32Array.
 (function (g) {
   'use strict';
-  const SR = 32000;
+  const SR = 24000;
   const NAMES_FLAT = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
   const NAMES_SHARP = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
   const MAJ_NAME = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
@@ -83,7 +83,13 @@
   const cache = new Map();
   const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
   let seed = 1; const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
-  function shot(key, make) { let b = cache.get(key); if (!b) { b = make(); cache.set(key, b); if (cache.size > 900) cache.delete(cache.keys().next().value); } return b; }
+  let cacheBytes = 0; const CACHE_MAX = 12e6; // keep the sound cache small (phones)
+  function shot(key, make) {
+    let b = cache.get(key);
+    if (!b) { b = make(); cache.set(key, b); cacheBytes += b.length * 4; while (cacheBytes > CACHE_MAX && cache.size > 1) { const k = cache.keys().next().value; cacheBytes -= cache.get(k).length * 4; cache.delete(k); } }
+    return b;
+  }
+  function clearCache() { cache.clear(); cacheBytes = 0; }
   function piano(m, dur) {
     const dq = Math.min(2.4, Math.round(dur * 8) / 8);
     return shot('p' + m + ':' + dq, () => {
@@ -276,6 +282,7 @@
     }
     if (on('melody')) score.notes.forEach(n => { if (n.b < total) put('melody', lead(n.c, n.d * spb * 0.95), n.b, 0.8, tAt(n.b)); });
     // mix + small room reverb
+    clearCache();
     reverb(mix);
     let peak = 0; for (let i = 0; i < len; i++) { const a = Math.abs(mix[i]); if (a > peak) peak = a; }
     const norm = peak > 0 ? 0.85 / peak : 1; for (let i = 0; i < len; i++) mix[i] *= norm;
