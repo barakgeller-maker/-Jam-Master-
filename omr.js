@@ -173,6 +173,7 @@
   }
 
   function assemble(systems, title, tempo) {
+    let keyFifths = null;
     const warnings = [];
     let clef = null, keyAcc = {}, meterTop = 4, meterBot = 4;
     const measures = []; // {events:[{kind:'note'|'rest', dur, midi, name, x, tieStart, tieEnd}], multi, startText}
@@ -199,6 +200,7 @@
       if (cg && (keyGl.length || si === 0)) {
         keyAcc = {};
         keyGl.forEach(k => { const p = pitchFromY(k.y, st, clef); keyAcc[p.step] = ACC[k.c]; });
+        if (keyFifths === null) keyFifths = keyGl.reduce((t, k) => t + (ACC[k.c] > 0 ? 1 : ACC[k.c] < 0 ? -1 : 0), 0);
       }
       // barlines
       const bars = [];
@@ -380,7 +382,7 @@
     if (!uniq.length || uniq[0].m !== 1) uniq.unshift({ m: 1, name: 'התחלה', beat: 0 });
     notes.forEach(n => delete n.tieOpen);
     const pickup = measures.length && !measures[0].multi && measureStart.length > 1 && measureStart[1] < meterQ - 1e-3 ? measureStart[1] : 0;
-    return { title, tempo: tempo || 100, meter: meterQ, pickup, measureStart, totalBeats: +pos.toFixed(4), sections: uniq, notes, warnings, measures: measureStart.length };
+    return { title, tempo: tempo || 100, keyFifths: keyFifths || 0, meter: meterQ, pickup, measureStart, totalBeats: +pos.toFixed(4), sections: uniq, notes, warnings, measures: measureStart.length };
   }
 
   g.OMR = { readPdf };

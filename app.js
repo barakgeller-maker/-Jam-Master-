@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const M = window.Music, A = window.Analysis;
-  const APP_VERSION = '2026.11.13-lists';
+  const APP_VERSION = '2026.11.14-band';
   const $app = document.getElementById('app');
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = t => { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = Math.floor(t % 60); return m + ':' + String(s).padStart(2, '0'); };
@@ -98,7 +98,17 @@
     ctx = null; return ac();
   }
   const bufCache = {};
+  function genSync(jam) {
+    const meter = Math.round(jam.score.meter || 4) || 4, bpm = jam.gen.tempo || jam.score.tempo || 100;
+    return { beatTimes: M.linearBeatTimes(meter * 60 / bpm, bpm, jam.score.totalBeats), verified: true, method: 'generated' };
+  }
   async function songBuffer(jam) {
+    if (jam.gen) {
+      const k = JSON.stringify(jam.gen); const c = bufCache[jam.id]; if (c && c._k === k) return c;
+      await new Promise(r => setTimeout(r, 30)); // let the spinner paint
+      const r = window.Band.render(jam.score, jam.gen);
+      const b = ac().createBuffer(1, r.data.length, r.sr); b.copyToChannel(r.data, 0); b._k = k; bufCache[jam.id] = b; return b;
+    }
     if (bufCache[jam.id]) return bufCache[jam.id];
     let ab;
     if (jam.demo && jam.audio) ab = await (await fetch(jam.audio)).arrayBuffer();
@@ -421,6 +431,7 @@ registerProcessor('jm-rec',R);`;
       <div class="timeline" id="tl"></div><div class="times"><span id="tCur">0:00</span><span id="tDur">0:00</span></div>
       ${score ? `<div class="chips" id="chips"></div>` : ''}
       <div class="bigctl" id="ctl"></div>
+      ${jam.gen ? `<div class="card bandcard" id="bandc"></div>` : ''}
       <div class="card" style="padding:4px 16px">
         ${score && synced ? `<div class="toggle"><div><div class="tl">עצירה כשיש טעות</div><div class="td">האפליקציה עוצרת, אומרת מה קרה ומחזירה אותך לתחילת המשפט</div></div><div class="sw ${stopOnMistake ? 'on' : ''}" id="swStop" role="switch"></div></div>` : ''}
       </div>
@@ -455,6 +466,7 @@ registerProcessor('jm-rec',R);`;
       }
       ctl.innerHTML = `<div class="errbox">לא הצלחתי לפתוח את קובץ השיר (${esc(e.message || e)}).</div>`; return;
     }
+    if (!document.body.contains(ctl)) return; // a newer page replaced this one while the song loaded
     const dur = buf.duration;
     document.getElementById('tDur').textContent = fmt(dur);
 
@@ -696,7 +708,7 @@ registerProcessor('jm-rec',R);`;
         report = await A.analyze({ samples: pcm, sr: c.sampleRate, songTime0, startT: r.startT, endT: stopT, score, beatTimes: jam.sync.beatTimes, instrumentId: jam.instrument },
           p => { const el = document.getElementById('prog'); if (el) el.textContent = 'בודק את הביצוע… ' + Math.round(p * 100) + '%'; });
       }
-      const take = { id: 't' + Date.now(), jamId: jam.id, created: Date.now(), sr: c.sampleRate, songTime0, startT: r.startT, endT: stopT, section: section ? section.name : null, report, pcm: new Blob([pcm.buffer]) };
+      const take = { id: 't' + Date.now(), jamId: jam.id, created: Date.now(), gen: jam.gen || null, genSync: jam.gen ? jam.sync : null, sr: c.sampleRate, songTime0, startT: r.startT, endT: stopT, section: section ? section.name : null, report, pcm: new Blob([pcm.buffer]) };
       await DB.put('takes', take);
       // keep the latest 10 takes per jam
       const all = (await DB.takesFor(jam.id)).sort((a, b) => b.created - a.created);
@@ -708,6 +720,7 @@ registerProcessor('jm-rec',R);`;
 
     // takes list
     const takes = (await DB.takesFor(jam.id).catch(() => [])).sort((a, b) => b.created - a.created);
+    if (!document.body.contains(ctl)) return;
     if (takes.length) document.getElementById('takes').innerHTML = takes.map(t => {
       const s = t.report && t.report.stats.total ? t.report.stats.score : null; const d = new Date(t.created);
       const col = s == null ? 'var(--muted)' : s >= 85 ? 'var(--good)' : s >= 60 ? 'var(--warn)' : 'var(--bad)';
@@ -715,11 +728,29 @@ registerProcessor('jm-rec',R);`;
     }).join('');
     document.querySelectorAll('.tk').forEach(el => el.onclick = () => go('#/take/' + el.dataset.id));
     if (synced) showPos(0, null);
+    if (jam.gen) bandCard();
+    function bandCard() {
+      const B = window.Band, gen = jam.gen, st = B.STYLES.find(x => x.id === gen.style) || B.STYLES[0];
+      const base = jam.score.tempo || 100, mutes = gen.mutes || {};
+      const el = document.getElementById('bandc');
+      el.innerHTML = `<div class="bandhead"><span class="e">${st.e}</span><div style="flex:1"><b>ההרכב: ${esc(st.name)}</b><div class="sub">${gen.key ? esc(B.keyName(gen.key.tonic, gen.key.mode)) : ''}</div></div></div>
+        <div class="slider"><label>טמפו <b class="ltr" id="bpmv">${gen.tempo}</b></label><input type="range" id="bpm" min="${Math.round(base * 0.25) * 2}" max="${Math.round(base * 0.625) * 2}" step="2" value="${gen.tempo}"></div>
+        <div class="hint" id="bpmh" style="margin-top:-4px">${Math.round(100 * gen.tempo / base)}% מהמקור · מתחילים לאט ומאיצים</div>
+        <div class="tracks">${B.tracksFor(gen.style).map(t => `<button class="trk ${mutes[t] ? '' : 'on'}" data-t="${t}"><span>${B.TRACKS[t].e}</span>${esc(B.TRACKS[t].name)}</button>`).join('')}</div>`;
+      const apply = async () => {
+        if (run) { toast('קודם עצור את הנגינה'); bandCard(); return; }
+        jam.sync = genSync(jam); if (!jam.demo) await DB.put('jams', jam); route();
+      };
+      const r = document.getElementById('bpm');
+      r.oninput = () => { document.getElementById('bpmv').textContent = r.value; document.getElementById('bpmh').textContent = `${Math.round(100 * r.value / base)}% מהמקור · מתחילים לאט ומאיצים`; };
+      r.onchange = () => { gen.tempo = +r.value; apply(); };
+      el.querySelectorAll('.trk').forEach(b => b.onclick = () => { const t = b.dataset.t; gen.mutes = { ...(gen.mutes || {}), [t]: !(gen.mutes || {})[t] }; apply(); });
+    }
   }
 
   function jamMenu(jam) {
     sheet(`<h3>${esc(jam.name)}</h3>
-      ${hasScore(jam) ? `<button class="btn" data-act="sync">🎚️ סנכרון השיר לתווים</button>` : ''}
+      ${hasScore(jam) && !jam.gen ? `<button class="btn" data-act="sync">🎚️ סנכרון השיר לתווים</button>` : ''}
       ${!jam.demo ? `<button class="btn" data-act="xml">📄 ${hasScore(jam) ? 'החלף' : 'הוסף'} תווים (PDF)</button>` : ''}
       <button class="btn" data-act="ren">✏️ שנה שם</button>
       <button class="btn" data-act="lists">📋 הוסף לרשימה</button>
@@ -787,7 +818,8 @@ registerProcessor('jm-rec',R);`;
   // ---------- Take / report page ----------
   async function TakePage(id) {
     const take = await DB.get('takes', id); if (!take) { go(''); return; }
-    const jam = await getJam(take.jamId); if (!jam) { go(''); return; }
+    let jam = await getJam(take.jamId); if (!jam) { go(''); return; }
+    if (take.gen) jam = { ...jam, gen: take.gen, sync: take.genSync || jam.sync };
     const rep = take.report;
     const score = jam.score; const bm = hasSync(jam) ? M.makeBeatMap(jam.sync.beatTimes) : null;
     const sec = s => score && bm ? (M.sectionAt(score, bm.toBeat(s)) || {}).name : '';
@@ -904,7 +936,12 @@ registerProcessor('jm-rec',R);`;
   // ---------- New Jam wizard ----------
   async function NewJam() {
     const st = { step: 0, name: null, instrument: myInstrument(), detected: null, score: null, scoreFile: null, sheetImages: [], audio: null, audioName: '', audioDur: 0 };
-    const STEPS = 3;
+    const steps = () => ['sheet', 'song'].concat(st.gen ? ['band'] : []).concat(['final']);
+    const S = () => steps()[st.step];
+    function concertScore() { const tr = M.instrument(st.instrument).transpose; const sc = JSON.parse(JSON.stringify(st.score)); sc.notes.forEach(n => { n.c -= tr; }); return sc; }
+    function bandKey() { const k0 = window.Band.detectKey(concertScore(), M.instrument(st.instrument).transpose); return { k0, k: { tonic: window.Band.mod12(k0.tonic + st.gen.shift), mode: k0.mode } }; }
+    let preview = null;
+    function stopPreview() { if (preview) { try { preview.stop(); } catch (e) { } preview = null; } }
     function autoName() {
       if (st.name != null && st.name.trim()) return st.name.trim();
       if (st.score && st.score.title) return st.score.title;
@@ -912,31 +949,48 @@ registerProcessor('jm-rec',R);`;
       const d = new Date(); return `ג׳אם ${d.getDate()}.${d.getMonth() + 1} · ${d.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })}`;
     }
     function render() {
-      const bar = `<div class="steps">${Array.from({ length: STEPS }, (_, i) => `<i class="${i <= st.step ? 'on' : ''}"></i>`).join('')}</div>`;
+      stopPreview();
+      const bar = `<div class="steps">${Array.from({ length: steps().length }, (_, i) => `<i class="${i <= st.step ? 'on' : ''}"></i>`).join('')}</div>`;
       let body = '';
-      if (st.step === 0) body = `<h2>התווים שלך</h2><div class="sub">בחר את קובץ ה-PDF של התווים, כמו שקיבלת אותו מהמעבד. אני קורא ממנו את התווים ובודק אותך לפיהם.</div>
+      if (S() === 'sheet') body = `<h2>התווים שלך</h2><div class="sub">בחר את קובץ ה-PDF של התווים, כמו שקיבלת אותו מהמעבד. אני קורא ממנו את התווים ובודק אותך לפיהם.</div>
         <div class="row"><div class="drop ${st.score ? 'done' : ''}" id="file"><span class="e">📄</span><b>בחר קובץ</b><span class="sub">ה-PDF של התווים</span></div>
         <div class="drop ${st.sheetImages.length ? 'done' : ''}" id="cam"><span class="e">📷</span><b>צלם תווים</b><span class="sub">בלי בדיקת טעויות בינתיים</span></div></div>
         <div id="sheetInfo"></div>
         <button class="btn primary" id="next">${st.score || st.sheetImages.length ? 'המשך' : 'דלג בינתיים'}</button>`;
-      if (st.step === 1) body = `<h2>השיר</h2><div class="sub">ההקלטה של ההרכב (או הפלייבק) שעליה תתאמן.</div>
-        <div class="drop ${st.audio ? 'done' : ''}" id="aud"><span class="e">🎵</span><b>${st.audio ? esc(st.audioName) : 'בחר קובץ שמע'}</b><span class="sub">${st.audio ? fmt(st.audioDur) : 'mp3, m4a, wav, וגם קבצים מהוואטסאפ'}</span></div>
-        <button class="btn primary" id="next" ${st.audio ? '' : 'disabled'}>המשך</button>`;
-      if (st.step === 2) body = `<h2>כמעט סיימנו</h2><div class="sub">${st.detected ? `לפי התווים זה חלק של <b>${esc(M.instrument(st.detected).name)}</b>. אם זה לא נכון, בחר כלי אחר.` : 'על איזה כלי החלק הזה?'}</div>
+      if (S() === 'song') body = `<h2>השיר</h2><div class="sub">ההקלטה של ההרכב (או הפלייבק) שעליה תתאמן.</div>
+        <div class="drop ${st.audio && !st.gen ? 'done' : ''}" id="aud"><span class="e">🎵</span><b>${st.audio ? esc(st.audioName) : 'בחר קובץ שמע'}</b><span class="sub">${st.audio ? fmt(st.audioDur) : 'mp3, m4a, wav, וגם קבצים מהוואטסאפ'}</span></div>
+        <div class="or">או</div>
+        <div class="drop gen ${st.gen ? 'done' : ''} ${st.score ? '' : 'off'}" id="genb"><span class="e">🎹</span><b>אין לי הקלטה: צור הרכב מהתווים</b><span class="sub">${st.score ? 'האפליקציה תנגן לך תופים, בס והרמוניה לפי התווים' : 'צריך קודם תווים מקובץ PDF (שלב קודם)'}</span></div>
+        <button class="btn primary" id="next" ${st.audio || st.gen ? '' : 'disabled'}>המשך</button>`;
+      if (S() === 'band') {
+        const B = window.Band, { k0, k } = bandKey(), tr = M.instrument(st.instrument).transpose, sug = B.suggestStyle(st.score);
+        const keys = Array.from({ length: 12 }, (_, i) => i).map(pc => { let sh = B.mod12(pc - k0.tonic); if (sh > 6) sh -= 12; return { pc, sh }; });
+        body = `<h2>ההרכב שלך</h2><div class="sub">בחר סגנון, סולם וטמפו. אפשר לשמוע דוגמה לפני שיוצרים.</div>
+        <div class="choices styles">${B.STYLES.map(x => `<button class="choice ${st.gen.style === x.id ? 'on' : ''}" data-s="${x.id}"><span class="e">${x.e}</span>${esc(x.name)}${x.id === sug ? ' <span class="pill good">מומלץ</span>' : ''}<small>${esc(x.desc)}</small></button>`).join('')}</div>
+        <div class="h2" style="margin-top:18px">סולם</div>
+        <div class="card keycard"><div><b style="font-size:20px">${esc(B.keyName(k.tonic, k.mode))}</b> <span class="ltr sub">(${esc(B.keyName(k.tonic, k.mode, { letter: true }))})</span></div>
+          <div class="sub">${st.gen.shift ? `הזזתי ${Math.abs(st.gen.shift)} חצאי טון ${st.gen.shift > 0 ? 'למעלה' : 'למטה'} מהמקור. גם התווים על המסך יעברו לסולם הזה.` : 'זה הסולם שזיהיתי בתווים.'} ${tr ? `בכתב של ${esc(M.instrument(st.instrument).name)}: ${esc(B.keyName(B.mod12(k.tonic + tr), k.mode))}.` : ''}</div>
+          <div class="keys">${keys.map(x => `<button class="kchip ${x.sh === st.gen.shift ? 'on' : ''}" data-sh="${x.sh}">${esc(B.keyName(x.pc, k0.mode, { letter: true }))}${x.sh === 0 ? '<i></i>' : ''}</button>`).join('')}</div></div>
+        <div class="h2" style="margin-top:6px">טמפו</div>
+        <div class="card"><div class="slider"><label class="ltr"><b id="tv">${st.gen.tempo}</b> BPM</label><input type="range" id="tempo" min="40" max="240" step="2" value="${st.gen.tempo}"></div><div class="hint">בתווים: ${st.score.tempo || '?'} · אפשר לשנות גם אחר כך במסך התרגול</div></div>
+        <button class="btn" id="prev">▶ שמע דוגמה</button>
+        <button class="btn primary" id="next">המשך</button>`;
+      }
+      if (S() === 'final') body = `<h2>כמעט סיימנו</h2><div class="sub">${st.detected ? `לפי התווים זה חלק של <b>${esc(M.instrument(st.detected).name)}</b>. אם זה לא נכון, בחר כלי אחר.` : 'על איזה כלי החלק הזה?'}</div>
         ${st.detected && !st.pickInst ? `<div class="card instpick"><span class="e">${M.instrument(st.instrument).e}</span><div style="flex:1"><b>${esc(M.instrument(st.instrument).name)}</b><div class="sub">זיהיתי מהתווים ✓</div></div><button class="btn ghost" id="chg" style="width:auto;margin:0">שנה</button></div>`
           : instrumentGrid(st.instrument).replace('choices big', 'choices compact')}
         <div class="sub" style="margin-top:18px">שם הג׳אם</div>
         <input class="field" id="nm" value="${esc(autoName())}" maxlength="60">
-        <button class="btn primary" id="next">${st.score ? 'צור ועבור לסנכרון' : 'צור ג׳אם'}</button>`;
+        <button class="btn primary" id="next">${st.gen ? 'צור את הג׳אם 🎶' : st.score ? 'צור ועבור לסנכרון' : 'צור ג׳אם'}</button>`;
       $app.innerHTML = `<div class="wrap wz"><div class="top"><button class="iconbtn" id="back">→</button><h1>ג׳אם חדש</h1></div>${bar}${body}</div>`;
-      document.getElementById('back').onclick = () => { if (st.step) { st.step--; render(); } else go(''); };
+      document.getElementById('back').onclick = () => { stopPreview(); if (st.step) { st.step--; render(); } else go(''); };
       const next = document.getElementById('next');
-      if (st.step === 2) {
+      if (S() === 'final') {
         const nm = document.getElementById('nm'); nm.oninput = () => st.name = nm.value;
         const chg = document.getElementById('chg'); if (chg) chg.onclick = () => { st.name = nm.value; st.pickInst = true; render(); };
         document.querySelectorAll('.choice').forEach(b => b.onclick = () => { st.instrument = b.dataset.i; document.querySelectorAll('.choice').forEach(x => x.classList.toggle('on', x === b)); });
       }
-      if (st.step === 0) {
+      if (S() === 'sheet') {
         const info = document.getElementById('sheetInfo');
         const showInfo = () => {
           let h = '';
@@ -966,30 +1020,58 @@ registerProcessor('jm-rec',R);`;
           else { st.sheetImages.push(f); render(); }
         });
       }
-      if (st.step === 1) {
+      if (S() === 'band') {
+        document.querySelectorAll('.styles .choice').forEach(b => b.onclick = () => { st.gen.style = b.dataset.s; render(); });
+        document.querySelectorAll('.kchip').forEach(b => b.onclick = () => { st.gen.shift = +b.dataset.sh; render(); });
+        const tp = document.getElementById('tempo'); tp.oninput = () => { document.getElementById('tv').textContent = tp.value; st.gen.tempo = +tp.value; };
+        const pv = document.getElementById('prev');
+        pv.onclick = async () => {
+          if (preview) { stopPreview(); pv.textContent = '▶ שמע דוגמה'; return; }
+          pv.textContent = 'מכין…'; await new Promise(r => setTimeout(r, 30));
+          const { k0, k } = bandKey(); const sc = window.Band.transposeScore(concertScore(), st.gen.shift, M.instrument(st.instrument).transpose, k0);
+          const first = sc.notes.length ? Math.max(0, sc.measureStart.filter(x => x <= sc.notes[0].b).pop() || 0) : 0;
+          const r = window.Band.render(sc, { style: st.gen.style, tempo: st.gen.tempo, key: k, mutes: {} }, { maxBeats: first + 32 });
+          const c = await readyAudio(); const b = c.createBuffer(1, r.data.length, r.sr); b.copyToChannel(r.data, 0);
+          const src = c.createBufferSource(); src.buffer = b; src.connect(c.destination);
+          const from = first ? r.offset + first * 60 / st.gen.tempo - (Math.round(sc.meter || 4) * 60 / st.gen.tempo) : 0;
+          src.start(0, Math.max(0, from), Math.min(20, r.data.length / r.sr - from)); preview = src; pv.textContent = '■ עצור';
+          src.onended = () => { if (preview === src) { preview = null; pv.textContent = '▶ שמע דוגמה'; } };
+        };
+      }
+      if (S() === 'song') {
+        document.getElementById('genb').onclick = () => {
+          if (!st.score) { toast('קודם צריך תווים מקובץ PDF. חזור שלב אחד אחורה.'); return; }
+          if (!st.gen) st.gen = { style: window.Band.suggestStyle(st.score), shift: 0, tempo: st.score.tempo || 100 };
+          st.audio = null; st.decoded = null; st.audioName = ''; render();
+        };
         document.getElementById('aud').onclick = () => pickFile('audio/*,video/mp4,.m4a,.mp3,.wav,.aac,.ogg', async f => {
           try {
             const ab = await f.arrayBuffer();
             const b = await new Promise((res, rej) => { const p = ac().decodeAudioData(ab.slice(0), res, rej); if (p && p.then) p.then(res, rej); });
-            st.audio = f; st.audioName = f.name; st.audioDur = b.duration; st.decoded = b; render();
+            st.audio = f; st.audioName = f.name; st.audioDur = b.duration; st.decoded = b; st.gen = null; render();
           } catch (e) { toast('לא הצלחתי לפתוח את קובץ השמע הזה'); }
         });
       }
       next.onclick = async () => {
-        if (st.step < 2) { st.step++; render(); return; }
+        if (S() !== 'final') { st.step++; render(); return; }
         next.disabled = true; next.textContent = 'שומר…';
         const id = 'j' + Date.now();
         // the sheet was read at written pitch; now that the instrument is known, store concert pitch
         if (st.score && st.scoreFile) { try { st.score = await readScoreFile(st.scoreFile, st.instrument); } catch (e) { } }
         else if (st.score) { const tr = M.instrument(st.instrument).transpose; st.score.notes.forEach(n => { n.c -= tr; }); st.score.namesFor = st.instrument; }
         const jam = { id, name: autoName(), instrument: st.instrument, created: Date.now(), score: st.score, sync: null };
-        await DB.put('blobs', st.audio, 'audio:' + id);
+        if (st.gen && st.score) {
+          const B = window.Band, tr = M.instrument(st.instrument).transpose, k0 = B.detectKey(st.score, tr);
+          jam.score = B.transposeScore(st.score, st.gen.shift, tr, k0);
+          jam.gen = { style: st.gen.style, tempo: st.gen.tempo, shift: st.gen.shift, key: { tonic: B.mod12(k0.tonic + st.gen.shift), mode: k0.mode }, mutes: { melody: true } };
+          jam.sync = genSync(jam);
+        } else await DB.put('blobs', st.audio, 'audio:' + id);
         for (let i = 0; i < st.sheetImages.length; i++) await DB.put('blobs', st.sheetImages[i], `sheet:${id}:${i}`);
         if (st.pdf) await DB.put('blobs', st.pdf, `sheet:${id}:pdf`);
         await DB.put('jams', jam);
         if (st.decoded) bufCache[id] = st.decoded;
         Lists.add(Lists.cur() ? Lists.cur().id : 'main', id);
-        go(st.score ? '#/sync/' + encodeURIComponent(id) : '#/jam/' + encodeURIComponent(id));
+        go(st.score && !st.gen ? '#/sync/' + encodeURIComponent(id) : '#/jam/' + encodeURIComponent(id));
       };
     }
     render();
