@@ -20,6 +20,9 @@
   async function pagePrimitives(pdfjs, page) {
     const O = pdfjs.OPS; const ol = await page.getOperatorList();
     let ctm = [1, 0, 0, 1, 0, 0], lw = 1, cur = null; const stack = [], prims = [];
+    // text state, to place every music glyph exactly (text extraction merges runs and loses their heights)
+    let tm = [1, 0, 0, 1, 0, 0], tlm = [1, 0, 0, 1, 0, 0], fontName = null, fontSize = 1, cs = 0, ws = 0, hs = 1, rise = 0, lead = 0; const opGlyphs = [];
+    const fontMatrix = n => { try { const f = page.commonObjs.get(n); return (f && f.fontMatrix) || [0.001, 0, 0, 0.001, 0, 0]; } catch (e) { return [0.001, 0, 0, 0.001, 0, 0]; } };
     const ap = (x, y) => [ctm[0] * x + ctm[2] * y + ctm[4], ctm[1] * x + ctm[3] * y + ctm[5]];
     for (let i = 0; i < ol.fnArray.length; i++) {
       const f = ol.fnArray[i], a = ol.argsArray[i];
@@ -27,6 +30,32 @@
       else if (f === O.restore) { const s = stack.pop(); if (s) [ctm, lw] = s; }
       else if (f === O.transform) ctm = mul(ctm, a);
       else if (f === O.setLineWidth) lw = a[0];
+      else if (f === O.beginText) { tm = [1, 0, 0, 1, 0, 0]; tlm = tm.slice(); }
+      else if (f === O.setFont) { fontName = a[0]; fontSize = a[1]; }
+      else if (f === O.setTextMatrix) { tm = a.slice(0, 6); tlm = tm.slice(); }
+      else if (f === O.moveText) { tlm = mul(tlm, [1, 0, 0, 1, a[0], a[1]]); tm = tlm.slice(); }
+      else if (f === O.setLeadingMoveText) { lead = -a[1]; tlm = mul(tlm, [1, 0, 0, 1, a[0], a[1]]); tm = tlm.slice(); }
+      else if (f === O.setLeading) lead = a[0];
+      else if (f === O.nextLine) { tlm = mul(tlm, [1, 0, 0, 1, 0, -lead]); tm = tlm.slice(); }
+      else if (f === O.setCharSpacing) cs = a[0];
+      else if (f === O.setWordSpacing) ws = a[0];
+      else if (f === O.setHScale) hs = a[0] / 100;
+      else if (f === O.setTextRise) rise = a[0];
+      else if (f === O.showText || f === O.showSpacedText || f === O.nextLineShowText || f === O.nextLineSetSpacingShowText) {
+        if (f === O.nextLineShowText || f === O.nextLineSetSpacingShowText) { tlm = mul(tlm, [1, 0, 0, 1, 0, -lead]); tm = tlm.slice(); }
+        const fm = fontMatrix(fontName); const arr = a[0] || [];
+        for (const gl of arr) {
+          if (typeof gl === 'number') { tm = mul(tm, [1, 0, 0, 1, -gl / 1000 * fontSize * hs, 0]); continue; }
+          if (!gl) continue;
+          const u = gl.unicode || ''; const c = u.codePointAt ? u.codePointAt(0) : 0;
+          if (c >= 0xE000 && c <= 0xF8FF) {
+            const m = mul(ctm, tm); const x = m[4] + m[2] * rise, y = m[5] + m[3] * rise; const sz = fontSize * Math.hypot(m[2], m[3]);
+            opGlyphs.push({ c, x, y, w: (gl.width || 0) * fm[0] * fontSize * Math.hypot(m[0], m[1]), size: sz });
+          }
+          const adv = ((gl.width || 0) * fm[0] * fontSize + cs + (gl.isSpace ? ws : 0)) * hs;
+          tm = mul(tm, [1, 0, 0, 1, adv, 0]);
+        }
+      }
       else if (f === O.constructPath) {
         const ops = a[0], args = a[1]; let k = 0; const pts = []; let curves = 0;
         for (const op of ops) {
@@ -56,6 +85,8 @@
         cps.forEach((c, i) => { if (c >= 0xE000 && c <= 0xF8FF) glyphs.push({ c, x: x + i * w, y, w, size }); });
       } else texts.push({ s: it.str, x, y, w: it.width, size, font: it.fontName });
     }
+    // prefer exact glyph positions from the drawing commands when they found the music
+    if (opGlyphs.length >= glyphs.length * 0.9 && opGlyphs.length) return { prims, glyphs: opGlyphs, texts };
     return { prims, glyphs, texts };
   }
 
@@ -195,7 +226,16 @@
       const firstEventX = Math.min(...G.filter(g => NOTEHEAD[g.c] || REST[g.c]).map(g => g.x), st.x1);
       const tsX = tsd.length ? Math.min(...tsd.map(g => g.x)) : firstEventX;
       // key signature: accidentals after the clef, before the time signature / first event
-      const firstBar = Math.min(st.x1, ...S.prims.filter(p => p.x1 - p.x0 < Math.max(0.8, sp * 0.6) && p.y0 <= st.bottom + sp * 0.15 && p.y1 >= st.top - sp * 0.15 && (p.stroke ? p.lw : p.x1 - p.x0) >= sp * 0.14).map(p => p.x0));
+      // barline: a vertical line across the whole staff; thick ones always, thin ones (e.g. Finale) only when no notehead sits on it
+      const heads = G.filter(g => NOTEHEAD[g.c]);
+      const isBar = p => {
+        if (!(p.x1 - p.x0 < Math.max(0.8, sp * 0.6) && p.y0 <= st.bottom + sp * 0.15 && p.y1 >= st.top - sp * 0.15)) return false;
+        const thick = p.stroke ? p.lw : (p.x1 - p.x0);
+        if (thick >= sp * 0.14) return true;
+        if (thick < sp * 0.06 || p.y0 < st.bottom - sp * 0.3 || p.y1 > st.top + sp * 0.3) return false;
+        const xm = (p.x0 + p.x1) / 2; return !heads.some(h => h.x - sp * 0.4 < xm && xm < h.x + (h.w || sp * 1.2) + sp * 0.4);
+      };
+      const firstBar = Math.min(st.x1, ...S.prims.filter(isBar).map(p => p.x0));
       const keyGl = G.filter(g => ACC[g.c] !== undefined && cg && g.x > cg.x && g.x < cg.x + sp * 14 && g.x < firstBar - sp && g.x < Math.min(tsX, firstEventX) - sp * 0.8);
       if (cg && (keyGl.length || si === 0)) {
         keyAcc = {};
@@ -205,10 +245,7 @@
       // barlines
       const bars = [];
       for (const p of S.prims) {
-        const vertical = p.x1 - p.x0 < Math.max(0.8, sp * 0.6) && p.y0 <= st.bottom + sp * 0.15 && p.y1 >= st.top - sp * 0.15;
-        if (!vertical) continue;
-        const thick = p.stroke ? p.lw : (p.x1 - p.x0);
-        if (thick >= sp * 0.14) bars.push((p.x0 + p.x1) / 2);
+        if (isBar(p)) bars.push((p.x0 + p.x1) / 2);
       }
       bars.sort((a, b) => a - b);
       const bx = []; bars.forEach(x => { if (!bx.length || x - bx[bx.length - 1] > sp * 1.2) bx.push(x); else bx[bx.length - 1] = Math.max(bx[bx.length - 1], x); });

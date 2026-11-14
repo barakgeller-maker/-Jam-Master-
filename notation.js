@@ -44,7 +44,8 @@
       const sp = spell(namesFor === instrumentId ? n.n : null, n.c + transpose);
       let b = n.b, left = n.d, first = true;
       while (left > EPS) {
-        const mi = at(b), room = measures[mi].end - b, take = Math.min(left, room);
+        const mi = at(b), room = measures[mi].end - b; if (room <= EPS) break; // never loop on notes past the last bar
+        const take = Math.min(left, room);
         measures[mi].ev.push({ kind: 'n', b, d: take, sp, idx, tieIn: !first });
         b += take; left -= take; first = false;
       }

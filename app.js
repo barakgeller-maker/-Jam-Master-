@@ -2,7 +2,26 @@
 (function () {
   'use strict';
   const M = window.Music, A = window.Analysis;
-  const APP_VERSION = '2026.11.14-live';
+  const APP_VERSION = '2026.11.14-fix5';
+  // ---------- on-device diagnostics: a breadcrumb trail saved before each risky step, so a crash leaves a trace ----------
+  const Diag = {
+    K: 'jm.diag',
+    get() { try { return JSON.parse(localStorage.getItem(this.K) || 'null'); } catch (e) { return null; } },
+    put(d) { try { localStorage.setItem(this.K, JSON.stringify(d)); } catch (e) { } },
+    begin(task, info) { this.put({ task, ver: APP_VERSION, ua: navigator.userAgent, devMem: navigator.deviceMemory || null, cores: navigator.hardwareConcurrency || null, t: Date.now(), info: info || null, steps: [], done: false }); this.step('begin'); },
+    step(n, info) {
+      const d = this.get(); if (!d || d.done) return;
+      const pm = performance && performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1e6) : null;
+      d.steps.push({ n, ms: Date.now() - d.t, heapMB: pm, info: info === undefined ? null : info }); if (d.steps.length > 60) d.steps.splice(1, d.steps.length - 60);
+      this.put(d);
+    },
+    end() { const d = this.get(); if (d && !d.done) { d.done = true; d.steps.push({ n: 'ok', ms: Date.now() - d.t }); this.put(d); } },
+    crashed() { const d = this.get(); return d && !d.done && !d.acked && Date.now() - d.t < 3 * 864e5 ? d : null; },
+    ack() { const d = this.get(); if (d) { d.acked = true; this.put(d); } }
+  };
+  window.addEventListener('error', e => Diag.step('error', String(e.message || e.error || e).slice(0, 300)));
+  window.addEventListener('unhandledrejection', e => Diag.step('rejection', String(e.reason && e.reason.message || e.reason).slice(0, 300)));
+  const STEP_HE = { begin: 'התחלה', 'band-screen': 'מסך בחירת ההרכב', 'preview-start': 'הכנת הדוגמה', 'preview-playing': 'השמעת הדוגמה', 'create-click': 'לחיצה על צור', 'create-score': 'הכנת התווים', 'create-band': 'חישוב הסולם וההרכב', 'create-saved': 'שמירה', 'jam-open': 'פתיחת הג׳אם', 'band-compose': 'בניית ההרכב', 'notation-start': 'ציור התווים', 'notation-done': 'ציור התווים הסתיים', 'ready': 'מוכן לנגינה', 'play-start': 'התחלת נגינה', 'pdf-start': 'קריאת ה-PDF', 'pdf-done': 'קריאת ה-PDF הסתיימה', error: 'שגיאה', rejection: 'שגיאה' };
   const $app = document.getElementById('app');
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = t => { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = Math.floor(t % 60); return m + ':' + String(s).padStart(2, '0'); };
@@ -111,6 +130,7 @@
   }
   async function songBuffer(jam) {
     if (jam.gen) {
+      Diag.step('band-compose');
       const k = JSON.stringify(jam.gen); const c = bufCache[jam.id]; if (c && c._k === k) return c;
       for (const x in bufCache) delete bufCache[x]; // free memory first
       // the band is played live (scheduled a second ahead), never rendered whole: memory stays small on phones
@@ -190,6 +210,13 @@ registerProcessor('jm-rec',R);`;
     const ns = score.notes; let i = idx;
     while (i > 0 && ns[i].b - (ns[i - 1].b + ns[i - 1].d) < 1.5) i--;
     return ns[i].b;
+  }
+  // if some bars were missed, notes can run past the end: add bars so every note has a place
+  function padScore(r) {
+    if (!r || !r.notes || !r.notes.length || !r.measureStart) return r;
+    const lastEnd = Math.max(...r.notes.map(n => n.b + n.d)); const mlen = Math.round(r.meter || 4) || 4;
+    let guard = 0; while (r.totalBeats < lastEnd - 1e-3 && guard++ < 2000) { r.measureStart.push(r.totalBeats); r.totalBeats += mlen; }
+    r.measures = r.measureStart.length; return r;
   }
   function hasScore(jam) { return jam.score && jam.score.notes && jam.score.notes.length > 0; }
   function hasSync(jam) { return jam.sync && jam.sync.beatTimes && jam.sync.beatTimes.length > 1; }
@@ -350,6 +377,7 @@ registerProcessor('jm-rec',R);`;
     document.getElementById('set').onclick = () => go('#/settings');
     document.getElementById('myInst').onclick = () => go('#/welcome');
     const allJams = await listJams();
+    const crash = Diag.crashed();
     Lists.init(allJams);
     // jams that ended up in no list (e.g. demos brought back) go to the open list
     allJams.forEach(j => { if (!Lists.listsOf(j.id).length) Lists.add(Lists.cur().id, j.id); });
@@ -365,13 +393,24 @@ registerProcessor('jm-rec',R);`;
         <div class="card jam"><div class="art">${inst.e}</div><div style="flex:1;min-width:0"><div class="t">${esc(j.name)}${tags}</div><div class="meta">${esc(inst.name)}${lt ? ' · ' + new Date(lt.created).toLocaleDateString('he-IL') : ''}</div></div>
         ${sc != null ? `<div class="last" style="color:${col}">${sc}%<small>אחרון</small></div>` : `<div class="last none">חדש</div>`}</div></div>`;
     }).join('');
-    $app.querySelector('.spinner').outerHTML = `<button class="newjam big" id="nj"><span>＋</span> ג׳אם חדש</button>
+    const crashHtml = crash ? (() => { const last = crash.steps.filter(x => x.n !== 'error' && x.n !== 'rejection').pop() || { n: 'begin' }; const err = crash.steps.filter(x => x.n === 'error' || x.n === 'rejection').pop();
+      return `<div class="warnbox" id="diagbox"><b>הניסיון האחרון נעצר באמצע.</b><br>השלב האחרון שהגיע אליו: ${esc(STEP_HE[last.n] || last.n)}${err ? `<br><span class="ltr" style="font-size:12px">${esc(err.info || '')}</span>` : ''}<br>זה יעזור לי מאוד לתקן: לחץ "העתק דוח" והדבק לי אותו בצ׳אט.
+        <div style="display:flex;gap:8px;margin-top:10px"><button class="btn primary" id="diagCopy" style="margin:0">📋 העתק דוח</button><button class="btn ghost" id="diagClose" style="margin:0;width:auto">סגור</button></div></div>`; })() : '';
+    $app.querySelector('.spinner').outerHTML = crashHtml + `<button class="newjam big" id="nj"><span>＋</span> ג׳אם חדש</button>
       <button class="listtitle" id="lt">${esc(cl.name)} <span>▾</span></button>
       ${items || '<div class="empty">הרשימה ריקה. לחץ על "ג׳אם חדש" כדי להוסיף שיר, או החלק שיר ברשימה אחרת ובחר "רשימות".</div>'}
       ${items ? '<div class="hint" style="text-align:center;margin-top:8px">החלק כרטיס הצידה כדי לשנות שם, להוסיף לרשימה או למחוק</div>' : ''}`;
     document.getElementById('lt').onclick = () => { if (document.getElementById('lt')._lp) { document.getElementById('lt')._lp = false; return; } listSwitcher(); };
     onLongPress(document.getElementById('lt'), () => manageList(Lists.cur()));
     document.getElementById('nj').onclick = () => go('#/new');
+    if (crash) {
+      document.getElementById('diagClose').onclick = () => { Diag.ack(); document.getElementById('diagbox').remove(); };
+      document.getElementById('diagCopy').onclick = async () => {
+        const txt = 'Jam Master diag\n' + JSON.stringify(crash);
+        try { await navigator.clipboard.writeText(txt); toast('הדוח הועתק. הדבק אותו בצ׳אט.'); }
+        catch (e) { sheet(`<h3>הדוח</h3><div class="sub">סמן הכל, העתק והדבק בצ׳אט:</div><textarea class="field ltr" style="height:200px;font-size:11px">${esc(txt)}</textarea><button class="btn ghost" data-close>סגור</button>`); }
+      };
+    }
     const byId = Object.fromEntries(jams.map(j => [j.id, j]));
     $app.querySelectorAll('.swipe').forEach(sw => bindSwipe(sw, byId[sw.dataset.id]));
   }
@@ -416,6 +455,8 @@ registerProcessor('jm-rec',R);`;
   // ---------- Jam page (listen / record / practice) ----------
   async function JamPage(id) {
     const jam = await getJam(id); if (!jam) { go(''); return; }
+    if (jam.score) { const tb = jam.score.totalBeats; padScore(jam.score); if (jam.score.totalBeats !== tb && jam.gen) jam.sync = genSync(jam); }
+    if (jam.gen) { const d = Diag.get(); if (!d || d.done) Diag.begin('band-open', { jam: jam.id, gen: jam.gen }); Diag.step('jam-open', { notes: jam.score.notes.length, beats: jam.score.totalBeats }); }
     const inst = M.instrument(jam.instrument);
     const score = hasScore(jam) ? jam.score : null;
     const synced = score && hasSync(jam);
@@ -479,11 +520,13 @@ registerProcessor('jm-rec',R);`;
 
     // scrolling staff (falls back to the text cue if it can't be drawn)
     let nt = null;
+    if (jam.gen) { Diag.step('notation-start', { events: buf.ev ? buf.ev.length : null, dur: Math.round(dur) }); }
     if (synced) {
       try { nt = await window.Notation.render(document.getElementById('score'), jam, { ink: '#f4f1fb', dim: '#8d86ad' }); }
-      catch (e) { console.warn('notation', e); const sc = document.getElementById('score'); if (sc) sc.remove(); document.querySelector('.stage').classList.remove('has-score'); }
+      catch (e) { console.warn('notation', e); Diag.step('error', 'notation: ' + (e.message || e)); const sc = document.getElementById('score'); if (sc) sc.remove(); document.querySelector('.stage').classList.remove('has-score'); }
     }
 
+    if (jam.gen) Diag.step('notation-done');
     // timeline
     const tl = document.getElementById('tl');
     const pct = t => (100 * t / dur).toFixed(3) + '%';
@@ -595,6 +638,7 @@ registerProcessor('jm-rec',R);`;
       const T0 = c.currentTime + 0.12;
       if (mode === 'record') { if (mic.ctx !== c) { await ensureMic(); } micStart(); }
       src.start(T0, S);
+      if (jam.gen) { Diag.begin('band-play', { mode, S }); Diag.step('play-start'); setTimeout(() => { if (run && run.src === src) Diag.end(); }, 6000); }
       run = { mode, src, T0, S, endT, startT: S, liveState: { badSince: null, silentSince: null, extraSince: null } };
       src.onended = () => { if (run && run.src === src) stop(true); };
       runningUI();
@@ -735,7 +779,7 @@ registerProcessor('jm-rec',R);`;
     }).join('');
     document.querySelectorAll('.tk').forEach(el => el.onclick = () => go('#/take/' + el.dataset.id));
     if (synced) showPos(0, null);
-    if (jam.gen) bandCard();
+    if (jam.gen) { bandCard(); Diag.step('ready'); Diag.end(); }
     function bandCard() {
       const B = window.Band, gen = jam.gen, st = B.STYLES.find(x => x.id === gen.style) || B.STYLES[0];
       const base = jam.score.tempo || 100, mutes = gen.mutes || {};
@@ -809,6 +853,7 @@ registerProcessor('jm-rec',R);`;
       const lib = await loadPdfJs();
       const r = await window.OMR.readPdf(lib, new Uint8Array(await f.arrayBuffer()));
       if (!r.notes.length) throw new Error('noNotes');
+      padScore(r);
       // the part is written for the player's instrument: store concert pitch, keep the written names
       r.notes.forEach(n => { n.c = n.c - inst.transpose; });
       r.namesFor = instrumentId;
@@ -970,6 +1015,7 @@ registerProcessor('jm-rec',R);`;
         <div class="drop gen ${st.gen ? 'done' : ''} ${st.score ? '' : 'off'}" id="genb"><span class="e">🎹</span><b>אין לי הקלטה: צור הרכב מהתווים</b><span class="sub">${st.score ? 'האפליקציה תנגן לך תופים, בס והרמוניה לפי התווים' : 'צריך קודם תווים מקובץ PDF (שלב קודם)'}</span></div>
         <button class="btn primary" id="next" ${st.audio || st.gen ? '' : 'disabled'}>המשך</button>`;
       if (S() === 'band') {
+        Diag.step('band-screen', { style: st.gen.style, shift: st.gen.shift, tempo: st.gen.tempo, inst: st.instrument });
         const B = window.Band, { k0, k } = bandKey(), tr = M.instrument(st.instrument).transpose, sug = B.suggestStyle(st.score);
         const keys = Array.from({ length: 12 }, (_, i) => i).map(pc => { let sh = B.mod12(pc - k0.tonic); if (sh > 6) sh -= 12; return { pc, sh }; });
         body = `<h2>ההרכב שלך</h2><div class="sub">בחר סגנון, סולם וטמפו. אפשר לשמוע דוגמה לפני שיוצרים.</div>
@@ -1020,8 +1066,10 @@ registerProcessor('jm-rec',R);`;
             catch (e) { toast('לא הצלחתי לקרוא את הקובץ כ-MusicXML'); }
           } else if (isPdf(f)) {
             st.pdf = f; st.score = null; st.reading = true; render();
+            Diag.begin('pdf', { size: f.size, name: f.name }); Diag.step('pdf-start');
             try { st.score = await readScoreFile(f, 'flute'); if (st.score.part) { st.detected = st.score.part; st.instrument = st.score.part; } }
-            catch (e) { if (e.message === 'pdflib') toast('צריך חיבור לאינטרנט כדי לקרוא PDF בפעם הראשונה'); }
+            catch (e) { Diag.step('error', 'pdf: ' + (e.message || e)); if (e.message === 'pdflib') toast('צריך חיבור לאינטרנט כדי לקרוא PDF בפעם הראשונה'); }
+            Diag.step('pdf-done', st.score ? { notes: st.score.notes.length, measures: st.score.measureStart.length } : null); Diag.end();
             st.reading = false; render();
           }
           else { st.sheetImages.push(f); render(); }
@@ -1034,7 +1082,7 @@ registerProcessor('jm-rec',R);`;
         const pv = document.getElementById('prev');
         pv.onclick = async () => {
           if (preview) { stopPreview(); pv.textContent = '▶ שמע דוגמה'; return; }
-          pv.textContent = 'מכין…'; await new Promise(r => setTimeout(r, 30));
+          pv.textContent = 'מכין…'; Diag.step('preview-start'); await new Promise(r => setTimeout(r, 30));
           const { k0, k } = bandKey(); const sc = window.Band.transposeScore(concertScore(), st.gen.shift, M.instrument(st.instrument).transpose, k0);
           const first = sc.notes.length ? Math.max(0, sc.measureStart.filter(x => x <= sc.notes[0].b).pop() || 0) : 0;
           let lb; try { lb = window.Band.live(sc, { style: st.gen.style, tempo: st.gen.tempo, key: k, mutes: {} }); }
@@ -1042,13 +1090,14 @@ registerProcessor('jm-rec',R);`;
           if (S() !== 'band' || !document.body.contains(pv)) return;
           const c = await readyAudio(); const src = lb.source(c); src.connect(c.destination);
           const from = first ? lb.offset + first * 60 / st.gen.tempo - (Math.round(sc.meter || 4) * 60 / st.gen.tempo) : 0;
-          src.start(c.currentTime + 0.05, Math.max(0, from), Math.min(20, lb.duration - from)); preview = src; pv.textContent = '■ עצור';
+          src.start(c.currentTime + 0.05, Math.max(0, from), Math.min(20, lb.duration - from)); preview = src; pv.textContent = '■ עצור'; Diag.step('preview-playing');
           src.onended = () => { if (preview === src) { preview = null; pv.textContent = '▶ שמע דוגמה'; } };
         };
       }
       if (S() === 'song') {
         document.getElementById('genb').onclick = () => {
           if (!st.score) { toast('קודם צריך תווים מקובץ PDF. חזור שלב אחד אחורה.'); return; }
+          Diag.begin('band', { notes: st.score.notes.length, measures: st.score.measureStart.length, beats: st.score.totalBeats, meter: st.score.meter, tempo: st.score.tempo, key: st.score.keyFifths, part: st.score.part, title: st.score.title });
           if (!st.gen) st.gen = { style: window.Band.suggestStyle(st.score), shift: 0, tempo: st.score.tempo || 100 };
           st.audio = null; st.decoded = null; st.audioName = ''; render();
         };
@@ -1063,6 +1112,7 @@ registerProcessor('jm-rec',R);`;
       next.onclick = async () => {
         if (S() !== 'final') { st.step++; render(); return; }
         next.disabled = true; next.textContent = 'שומר…';
+        if (st.gen) Diag.step('create-click');
         try {
           const id = 'j' + Date.now();
           // the sheet was read at written pitch; now that the instrument is known, store concert pitch
@@ -1070,17 +1120,20 @@ registerProcessor('jm-rec',R);`;
           if (st.score && st.scoreFile) { try { score = await readScoreFile(st.scoreFile, st.instrument); } catch (e) { } }
           else if (st.score) { score = concertScore(); score.namesFor = st.instrument; }
           const jam = { id, name: autoName(), instrument: st.instrument, created: Date.now(), score, sync: null };
+          if (st.gen) Diag.step('create-score', { notes: score && score.notes.length });
           if (st.gen && score) {
             const B = window.Band, tr = M.instrument(st.instrument).transpose, k0 = B.detectKey(score, tr);
             jam.score = B.transposeScore(score, st.gen.shift, tr, k0);
             jam.gen = { style: st.gen.style, tempo: st.gen.tempo, shift: st.gen.shift, key: { tonic: B.mod12(k0.tonic + st.gen.shift), mode: k0.mode }, mutes: { melody: true } };
             jam.sync = genSync(jam);
+            Diag.step('create-band', { key: jam.gen.key, beats: jam.sync.beatTimes.length });
           } else await DB.put('blobs', st.audio, 'audio:' + id);
           for (let i = 0; i < st.sheetImages.length; i++) await DB.put('blobs', st.sheetImages[i], `sheet:${id}:${i}`);
           if (st.pdf) await DB.put('blobs', st.pdf, `sheet:${id}:pdf`);
           await DB.put('jams', jam);
           if (st.decoded) keepBuf(id, st.decoded);
           Lists.add(Lists.cur() ? Lists.cur().id : 'main', id);
+          if (st.gen) Diag.step('create-saved');
           go(st.score && !st.gen ? '#/sync/' + encodeURIComponent(id) : '#/jam/' + encodeURIComponent(id));
         } catch (e) { console.error(e); next.disabled = false; next.textContent = 'נסה שוב'; toast('משהו נתקע ביצירת הג׳אם: ' + (e.message || e), 6000); }
       };
