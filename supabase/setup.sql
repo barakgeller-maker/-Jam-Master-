@@ -29,3 +29,19 @@ create policy "own files update" on storage.objects for update to authenticated
   using (bucket_id = 'files' and (storage.foldername(name))[1] = auth.uid()::text);
 create policy "own files delete" on storage.objects for delete to authenticated
   using (bucket_id = 'files' and (storage.foldername(name))[1] = auth.uid()::text);
+
+-- Sharing a jam with the band (added 2026-11-15)
+create table if not exists public.shares (
+  code text primary key,
+  owner uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  data jsonb not null,
+  created_at timestamptz not null default now()
+);
+alter table public.shares enable row level security;
+drop policy if exists "own shares" on public.shares;
+create policy "own shares" on public.shares for all to authenticated
+  using (owner = auth.uid()) with check (owner = auth.uid());
+create or replace function public.get_share(c text) returns jsonb
+  language sql stable security definer set search_path = public
+  as $$ select data from public.shares where code = c $$;
+grant execute on function public.get_share(text) to anon, authenticated;
