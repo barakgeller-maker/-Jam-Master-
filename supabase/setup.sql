@@ -9,6 +9,7 @@ create table if not exists public.items (
   primary key (user_id, kind, id)
 );
 alter table public.items enable row level security;
+grant select, insert, update, delete on public.items to authenticated;
 drop policy if exists "own items" on public.items;
 create policy "own items" on public.items for all to authenticated
   using (user_id = auth.uid()) with check (user_id = auth.uid());
@@ -44,4 +45,5 @@ create policy "own shares" on public.shares for all to authenticated
 create or replace function public.get_share(c text) returns jsonb
   language sql stable security definer set search_path = public
   as $$ select data from public.shares where code = c $$;
+grant select, insert, update, delete on public.shares to authenticated;
 grant execute on function public.get_share(text) to anon, authenticated;
