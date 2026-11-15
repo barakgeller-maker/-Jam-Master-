@@ -500,35 +500,24 @@ registerProcessor('jm-rec',R);`;
     const err = m => { const x = el.querySelector('.lerr'); if (x) { x.textContent = m; x.style.display = m ? '' : 'none'; } };
     const errBox = '<div class="errbox lerr" style="display:none;margin-top:10px"></div>';
     function askEmail() {
-      el.innerHTML = `<div><h3>התחברות</h3><div class="sub">נשלח לך למייל קוד כניסה. אין צורך בסיסמה.</div>
+      el.innerHTML = `<div><h3>התחברות</h3><div class="sub">נשלח לך מייל עם קישור כניסה. אין צורך בסיסמה.</div>
         <input class="field ltr" id="em" type="email" inputmode="email" autocomplete="email" placeholder="name@gmail.com" value="${esc(email)}">
-        ${errBox}<button class="btn primary" id="send" style="margin-top:12px">שלח לי קוד</button><button class="btn ghost" data-close>ביטול</button></div>`;
+        ${errBox}<button class="btn primary" id="send" style="margin-top:12px">שלח לי קישור</button><button class="btn ghost" data-close>ביטול</button></div>`;
       const em = el.querySelector('#em'), send = el.querySelector('#send');
       em.onkeydown = e => { if (e.key === 'Enter') send.click(); };
       send.onclick = async () => {
         email = em.value.trim().toLowerCase();
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { err('נראה שכתובת המייל לא שלמה'); return; }
         send.disabled = true; send.textContent = 'שולח…'; err('');
-        try { await Cloud.sendCode(email); Settings.set('lastEmail', email, true); askCode(); }
-        catch (e) { send.disabled = false; send.textContent = 'שלח לי קוד'; err(/rate|security purposes/i.test(e.message || '') ? 'שלחנו כבר קוד לפני רגע. חכה דקה ונסה שוב.' : navigator.onLine ? 'לא הצלחתי לשלוח את הקוד: ' + (e.message || e) : 'אין חיבור לאינטרנט כרגע'); }
+        try { await Cloud.sendLink(email); Settings.set('lastEmail', email, true); sent(); }
+        catch (e) { send.disabled = false; send.textContent = 'שלח לי קישור'; err(/rate|security purposes/i.test(e.message || '') ? 'נשלחו כבר כמה מיילים לאחרונה. חכה קצת ונסה שוב.' : navigator.onLine ? 'לא הצלחתי לשלוח את המייל: ' + (e.message || e) : 'אין חיבור לאינטרנט כרגע'); }
       };
       setTimeout(() => em.focus(), 50);
     }
-    function askCode() {
-      el.innerHTML = `<div><h3>מה הקוד?</h3><div class="sub">שלחנו קוד לכתובת <span class="ltr">${esc(email)}</span>. אם הוא לא מגיע תוך דקה, בדוק גם בספאם.</div>
-        <input class="field ltr" id="cd" inputmode="numeric" autocomplete="one-time-code" maxlength="10" placeholder="123456" style="text-align:center;font-size:24px;letter-spacing:6px">
-        ${errBox}<button class="btn primary" id="ok" style="margin-top:12px">כניסה</button><button class="btn ghost" id="back2">מייל אחר / שלח שוב</button></div>`;
-      const cd = el.querySelector('#cd'), ok = el.querySelector('#ok');
+    function sent() {
+      el.innerHTML = `<div><h3>📬 בדוק את המייל</h3><div class="sub">שלחנו מייל לכתובת <span class="ltr">${esc(email)}</span>.<br><br>פתח אותו <b>בטלפון הזה</b> ולחץ על <b>Sign in</b>. האפליקציה תיפתח ותתחבר לבד.<br><br>לא הגיע תוך דקה? בדוק גם בספאם.</div>
+        <button class="btn primary" data-close style="margin-top:12px">הבנתי</button><button class="btn ghost" id="back2">מייל אחר / שלח שוב</button></div>`;
       el.querySelector('#back2').onclick = askEmail;
-      cd.onkeydown = e => { if (e.key === 'Enter') ok.click(); };
-      ok.onclick = async () => {
-        const code = cd.value.replace(/\D/g, '');
-        if (code.length < 6) { err('הקוד צריך להיות 6 ספרות או יותר'); return; }
-        ok.disabled = true; ok.textContent = 'בודק…'; err('');
-        try { await Cloud.verifyCode(email, code); close(); toast('מחובר! מעלה את הג׳אמים לענן…', 3500); accountCard(); }
-        catch (e) { ok.disabled = false; ok.textContent = 'כניסה'; err(/expired|invalid/i.test(e.message || '') ? 'הקוד לא נכון או שפג תוקפו. נסה שוב או בקש קוד חדש.' : 'לא הצלחתי להתחבר: ' + (e.message || e)); }
-      };
-      setTimeout(() => cd.focus(), 50);
     }
     askEmail();
   }
@@ -1358,6 +1347,6 @@ registerProcessor('jm-rec',R);`;
       document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => { }); });
     }).catch(() => { });
   }
-  if (window.Cloud) Cloud.init({ DB, Settings, removeJamLocal, refresh() { const h = IN_FRAME ? curRoute : location.hash; if (!h || h === '#/' || h === '#') route(); } });
+  if (window.Cloud) Cloud.init({ DB, Settings, removeJamLocal, toast, refresh() { const h = IN_FRAME ? curRoute : location.hash; if (!h || h === '#/' || h === '#') route(); } });
   route();
 })();

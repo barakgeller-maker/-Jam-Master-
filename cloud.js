@@ -17,7 +17,7 @@
   };
   const hasToken = () => { try { return !!localStorage.getItem(TOKEN); } catch (e) { return false; } };
 
-  let app = null, sb = null, user = null, ready = null;
+  let app = null, sb = null, user = null, ready = null, loadFailed = false;
   let syncing = false, again = false, timer = null, lastErr = null;
   const subs = [];
   const emit = () => subs.forEach(f => { try { f(); } catch (e) { } });
@@ -172,17 +172,29 @@
   window.Cloud = {
     init(a) {
       app = a;
-      const fromLink = /[?&]code=/.test(location.search);
-      if (hasToken() || fromLink) client().then(() => { if (fromLink) history.replaceState(null, '', location.pathname + location.hash); if (user) sync(); emit(); }).catch(() => { });
+      // back from the sign-in link in the email (?code=…), or from a link that failed (?error=…)
+      const q = location.search + location.hash, fromLink = /[?&]code=/.test(q), linkErr = /error_description=|error_code=/.test(q);
+      if (linkErr) {
+        const expired = /expired|otp_expired/i.test(q);
+        history.replaceState(null, '', location.pathname + '#/settings');
+        setTimeout(() => app.toast && app.toast(expired ? 'הקישור כבר לא בתוקף. בקש קישור חדש בהגדרות.' : 'ההתחברות לא הצליחה. נסה שוב מההגדרות.', 6000), 300);
+      }
+      if (hasToken() || fromLink) client().then(() => {
+        if (fromLink) {
+          history.replaceState(null, '', location.pathname + '#/');
+          app.toast && app.toast(user ? 'מחובר! הג׳אמים נשמרים עכשיו גם בענן ☁️' : 'ההתחברות לא הושלמה. פתח את הקישור מהמייל באותו דפדפן שבו ביקשת אותו.', 6000);
+        }
+        if (user) sync(); emit();
+      }).catch(() => { loadFailed = true; emit(); });
       window.addEventListener('online', () => soon(500));
       document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && user) soon(800); });
     },
     touch, sync, fetchBlob,
     onChange(f) { subs.push(f); return () => { const i = subs.indexOf(f); if (i >= 0) subs.splice(i, 1); }; },
-    info() { return { user: user ? { email: user.email } : null, maybe: hasToken(), syncing, last: L.get('last', 0), error: lastErr, pending: (() => { const d = dirty(); return Object.keys(d.jams).length + Object.keys(d.blobs).length + (d.state ? 1 : 0); })() }; },
-    async sendCode(email) {
+    info() { return { user: user ? { email: user.email } : null, maybe: hasToken() && !loadFailed, syncing, last: L.get('last', 0), error: lastErr, pending: (() => { const d = dirty(); return Object.keys(d.jams).length + Object.keys(d.blobs).length + (d.state ? 1 : 0); })() }; },
+    async sendLink(email) {
       await client();
-      const { error } = await sb.auth.signInWithOtp({ email, options: { shouldCreateUser: true } });
+      const { error } = await sb.auth.signInWithOtp({ email, options: { shouldCreateUser: true, emailRedirectTo: location.origin + location.pathname } });
       if (error) throw error;
     },
     async verifyCode(email, token) {
