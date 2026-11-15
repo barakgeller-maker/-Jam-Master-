@@ -44,13 +44,14 @@
   }
 
   // ---------- what changed on this phone since the last sync ----------
-  const dirty = () => L.get('dirty', { jams: {}, blobs: {}, state: false });
+  const dirty = () => { const d = L.get('dirty', null) || {}; return { jams: d.jams || {}, blobs: d.blobs || {}, takes: d.takes || {}, state: !!d.state }; };
   function markDirty(fn) { const d = dirty(); fn(d); L.set('dirty', d); }
   // called by the app's storage on every local write (not for writes made by the sync itself)
   function touch(kind, key, val) {
     if (!hasToken() && !user) return;
     if (kind === 'jams') markDirty(d => d.jams[key] = val === undefined ? 'del' : 1);
     else if (kind === 'blobs') markDirty(d => d.blobs[key] = val === undefined ? 'del' : 1);
+    else if (kind === 'takes') markDirty(d => d.takes[key] = val === undefined ? 'del' : 1);
     else if (kind === 'state') { if (!isStateKey(key)) return; markDirty(d => d.state = true); L.set('stateT', Date.now()); }
     else return;
     soon(3000);
@@ -58,6 +59,27 @@
   function soon(ms) { clearTimeout(timer); timer = setTimeout(() => sync(), ms); }
 
   const pathOf = key => user.id + '/' + key.replace(/[^A-Za-z0-9._-]/g, '_');
+  const takePath = id => user.id + '/take_' + id;
+  // recordings travel as 16-bit mono at 22 kHz: about 2.6 MB a minute instead of 11
+  const TAKE_SR = 22050;
+  async function packTake(t) {
+    const f = new Float32Array(await t.pcm.arrayBuffer()), ratio = t.sr / TAKE_SR, n = Math.floor(f.length / ratio);
+    const o = new Int16Array(n), h = Math.max(1, Math.round(ratio / 2));
+    for (let i = 0; i < n; i++) {
+      const c = Math.round(i * ratio), a = Math.max(0, c - h + 1), b = Math.min(f.length, c + h); let sum = 0;
+      for (let k = a; k < b; k++) sum += f[k];
+      const v = sum / Math.max(1, b - a); o[i] = v >= 1 ? 32767 : v <= -1 ? -32768 : Math.round(v * 32767);
+    }
+    return new Blob([o.buffer], { type: 'application/octet-stream' });
+  }
+  async function listAll(uid) { // the storage listing comes in pages
+    const out = [];
+    for (let off = 0; ; off += 1000) {
+      const { data, error } = await sb.storage.from(BUCKET).list(uid, { limit: 1000, offset: off });
+      if (error) throw error;
+      out.push(...(data || [])); if (!data || data.length < 1000) return out;
+    }
+  }
   const jamOfBlob = key => key.split(':')[1];
 
   function stateNow() {
@@ -83,10 +105,14 @@
     let changed = false;
     try {
       const uid = user.id, firstKey = 'synced.' + uid, first = !L.get(firstKey, false);
-      const { data: rows, error } = await sb.from('items').select('kind,id,data,deleted,updated_at').limit(5000);
-      if (error) throw error;
-      const remote = { jam: {}, state: null };
-      rows.forEach(r => { if (r.kind === 'jam') remote.jam[r.id] = r; else if (r.kind === 'state' && r.id === 'main') remote.state = r; });
+      const rows = []; // the server hands rows out 1000 at a time
+      for (let off = 0; ; off += 1000) {
+        const { data, error } = await sb.from('items').select('kind,id,data,deleted,updated_at').order('kind').order('id').range(off, off + 999);
+        if (error) throw error;
+        rows.push(...data); if (data.length < 1000) break;
+      }
+      const remote = { jam: {}, take: {}, state: null };
+      rows.forEach(r => { if (r.kind === 'jam') remote.jam[r.id] = r; else if (r.kind === 'take') remote.take[r.id] = r; else if (r.kind === 'state' && r.id === 'main') remote.state = r; });
       const d = dirty();
       const local = await app.DB.all('jams').catch(() => []);
       const localById = Object.fromEntries(local.map(j => [j.id, j]));
@@ -121,16 +147,32 @@
         L.set('stateT', rs.t); changed = true;
       } else if (!rs || d.state) pushState = true;
 
+      // recordings: the report travels as a row, the sound as a compact file fetched when opened
+      const localTakes = await app.DB.all('takes').catch(() => []);
+      const ltById = Object.fromEntries(localTakes.map(t => [t.id, t]));
+      for (const id in remote.take) {
+        const r = remote.take[id], mine = ltById[id];
+        if (d.takes[id]) continue;
+        if (r.deleted) { if (mine) { await app.DB.del('takes', id, true); changed = true; } }
+        else if (!mine) { await app.DB.put('takes', { ...r.data, pcm: null }, undefined, true); changed = true; }
+        else if (r.data.audioGone && !mine.audioGone) { mine.pcm = null; mine.audioGone = true; await app.DB.put('takes', mine, undefined, true); }
+      }
+      const pushTakes = localTakes.filter(t => d.takes[t.id] === 1 || !remote.take[t.id]);
+      for (const id in d.takes) if (d.takes[id] === 'del') pushTakes.push({ id, _del: true });
+
       // upload
       const now = new Date().toISOString();
       const up = push.map(j => j._del ? { user_id: uid, kind: 'jam', id: j.id, data: { t: Date.now() }, deleted: true, updated_at: now }
         : { user_id: uid, kind: 'jam', id: j.id, data: { ...j, updatedAt: j.updatedAt || Date.now() }, deleted: false, updated_at: now });
+      for (const t of pushTakes) {
+        if (t._del) { up.push({ user_id: uid, kind: 'take', id: t.id, data: {}, deleted: true, updated_at: now }); continue; }
+        const { pcm, ...meta } = t; up.push({ user_id: uid, kind: 'take', id: t.id, data: meta, deleted: false, updated_at: now });
+      }
       if (pushState) { const t = L.get('stateT', 0) || Date.now(); L.set('stateT', t); up.push({ user_id: uid, kind: 'state', id: 'main', data: { t, v: stateNow() }, deleted: false, updated_at: now }); }
       for (let i = 0; i < up.length; i += 20) { const { error: e2 } = await sb.from('items').upsert(up.slice(i, i + 20)); if (e2) throw e2; }
 
       // files: upload what the cloud doesn't have yet, remove files of deleted jams
-      const { data: list, error: e3 } = await sb.storage.from(BUCKET).list(uid, { limit: 1000 });
-      if (e3) throw e3;
+      const list = await listAll(uid);
       const have = new Set((list || []).map(f => uid + '/' + f.name));
       const gone = new Set(Object.keys(remote.jam).filter(id => remote.jam[id].deleted && !d.jams[id]).concat(Object.keys(d.jams).filter(id => d.jams[id] === 'del')));
       const keys = await app.DB.blobKeys().catch(() => []);
@@ -140,7 +182,14 @@
         const { error: e4 } = await sb.storage.from(BUCKET).upload(pathOf(k), b, { upsert: true, contentType: b.type || 'application/octet-stream' });
         if (e4) throw e4;
       }
+      for (const t of pushTakes) {
+        if (t._del || !t.pcm || t.audioGone || have.has(takePath(t.id))) continue;
+        const { error: e5 } = await sb.storage.from(BUCKET).upload(takePath(t.id), await packTake(t), { upsert: true, contentType: 'application/octet-stream' });
+        if (e5) throw e5;
+      }
       const delPaths = new Set(Object.keys(d.blobs).filter(k => d.blobs[k] === 'del').map(pathOf));
+      pushTakes.forEach(t => { if (t._del || t.audioGone) delPaths.add(takePath(t.id)); });
+      Object.keys(remote.take).forEach(id => { const r = remote.take[id]; if (r.deleted || r.data.audioGone) delPaths.add(takePath(id)); });
       const rm = [...have].filter(p => gone.has(p.split('/')[1].split('_')[1]) || delPaths.has(p));
       if (rm.length) await sb.storage.from(BUCKET).remove(rm);
 
@@ -148,6 +197,7 @@
       markDirty(cur => {
         for (const id in d.jams) if (cur.jams[id] === d.jams[id]) delete cur.jams[id];
         for (const k in d.blobs) if (cur.blobs[k] === d.blobs[k]) delete cur.blobs[k];
+        for (const k in d.takes) if (cur.takes[k] === d.takes[k]) delete cur.takes[k];
         if (d.state && L.get('stateT', 0) === stateT0) cur.state = false;
       });
       L.set(firstKey, true); L.set('last', Date.now());
@@ -208,6 +258,21 @@
     return data;
   }
 
+  // a recording made on another device: fetch its sound the first time it is opened
+  async function fetchTakeAudio(take) {
+    if (!hasToken()) return null;
+    try {
+      await client(); if (!user) return null;
+      const { data, error } = await sb.storage.from(BUCKET).download(takePath(take.id));
+      if (error || !data) return null;
+      const i16 = new Int16Array(await data.arrayBuffer()), f = new Float32Array(i16.length);
+      for (let i = 0; i < i16.length; i++) f[i] = i16[i] / 32768;
+      take.pcm = new Blob([f.buffer]); take.sr = TAKE_SR;
+      await app.DB.put('takes', take, undefined, true);
+      return take;
+    } catch (e) { return null; }
+  }
+
   window.Cloud = {
     init(a) {
       app = a;
@@ -228,9 +293,9 @@
       window.addEventListener('online', () => soon(500));
       document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && user) soon(800); });
     },
-    touch, sync, fetchBlob, share, getShare,
+    touch, sync, fetchBlob, fetchTakeAudio, share, getShare,
     onChange(f) { subs.push(f); return () => { const i = subs.indexOf(f); if (i >= 0) subs.splice(i, 1); }; },
-    info() { return { user: user ? { email: user.email } : null, maybe: hasToken() && !loadFailed, syncing, last: L.get('last', 0), error: lastErr, pending: (() => { const d = dirty(); return Object.keys(d.jams).length + Object.keys(d.blobs).length + (d.state ? 1 : 0); })() }; },
+    info() { return { user: user ? { email: user.email } : null, maybe: hasToken() && !loadFailed, syncing, last: L.get('last', 0), error: lastErr, pending: (() => { const d = dirty(); return Object.keys(d.jams).length + Object.keys(d.blobs).length + Object.keys(d.takes).length + (d.state ? 1 : 0); })() }; },
     async sendLink(email) {
       await client();
       const { error } = await sb.auth.signInWithOtp({ email, options: { shouldCreateUser: true, emailRedirectTo: location.origin + location.pathname } });

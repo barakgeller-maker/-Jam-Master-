@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const M = window.Music, A = window.Analysis;
-  const APP_VERSION = '2026.11.15-share';
+  const APP_VERSION = '2026.11.15-takes';
   // ---------- on-device diagnostics: a breadcrumb trail saved before each risky step, so a crash leaves a trace ----------
   const Diag = {
     K: 'jm.diag',
@@ -844,9 +844,9 @@ registerProcessor('jm-rec',R);`;
       }
       const take = { id: 't' + Date.now(), jamId: jam.id, created: Date.now(), gen: jam.gen || null, genSync: jam.gen ? jam.sync : null, sr: c.sampleRate, songTime0, startT: r.startT, endT: stopT, section: section ? section.name : null, report, pcm: new Blob([pcm.buffer]) };
       await DB.put('takes', take);
-      // keep the latest 10 takes per jam
+      // every report is kept as history; the sound only for the latest 10 takes per jam (it is large)
       const all = (await DB.takesFor(jam.id)).sort((a, b) => b.created - a.created);
-      for (const old of all.slice(10)) await DB.del('takes', old.id);
+      for (const old of all.slice(10)) if (!old.audioGone) { old.pcm = null; old.audioGone = true; await DB.put('takes', old); }
       go('#/take/' + take.id);
     }
 
@@ -1050,7 +1050,11 @@ registerProcessor('jm-rec',R);`;
 
   // ---------- Take / report page ----------
   async function TakePage(id) {
-    const take = await DB.get('takes', id); if (!take) { go(''); return; }
+    let take = await DB.get('takes', id); if (!take) { go(''); return; }
+    if (!take.pcm && !take.audioGone && window.Cloud) {
+      $app.innerHTML = `<div class="wrap"><div class="spinner"></div><div class="hint" style="text-align:center">מוריד את ההקלטה…</div></div>`;
+      take = (await Cloud.fetchTakeAudio(take)) || take;
+    }
     let jam = await getJam(take.jamId); if (!jam) { go(''); return; }
     if (take.gen) jam = { ...jam, gen: take.gen, sync: take.genSync || jam.sync };
     const rep = take.report;
@@ -1087,7 +1091,8 @@ registerProcessor('jm-rec',R);`;
         <div class="h2">מה לשפר</div><div class="card">${rep.tips.map(t => `<div class="tip"><div class="e">${t.e}</div><div>${esc(t.t)}</div></div>`).join('')}</div>` :
         `<div class="warnbox">ההקלטה נשמרה. בדיקת טעויות תהיה זמינה אחרי שיהיו לג׳אם תווים מסונכרנים.</div>`}
       <div class="h2">הביצוע המשולב</div>
-      <div class="card">
+      ${!take.pcm ? `<div class="card"><div class="hint">${take.audioGone ? 'הצליל של ההקלטה הזו כבר לא שמור: נשמרות 10 ההקלטות האחרונות של כל שיר. הדוח נשאר כאן כדי שתוכל ללמוד ממנו.' : 'לא הצלחתי להוריד את הצליל של ההקלטה הזו (אולי אין אינטרנט כרגע). הדוח זמין. נסה שוב מאוחר יותר.'}</div></div>` : ''}
+      <div class="card" ${!take.pcm ? 'style="display:none"' : ''}>
         <div class="timeline" id="tl"><div class="head" id="head" style="left:0"></div></div><div class="times"><span id="tCur">0:00</span><span id="tDur">0:00</span></div>
         <div class="bigctl" style="margin:10px 0"><button class="round play" id="bPlay">▶</button></div>
         <div class="slider"><label>השיר</label><input type="range" id="vSong" min="0" max="1.5" step="0.05" value="${Settings.get('mixSong', 0.8)}"></div>
@@ -1102,6 +1107,7 @@ registerProcessor('jm-rec',R);`;
     document.getElementById('again').onclick = () => go('#/jam/' + encodeURIComponent(jam.id));
     document.getElementById('delTake').onclick = async () => { await DB.del('takes', take.id); go('#/jam/' + encodeURIComponent(jam.id)); };
 
+    if (!take.pcm) { document.querySelectorAll('.issue').forEach(el => el.querySelector('.go') && el.querySelector('.go').remove()); return; }
     let c = await readyAudio();
     const songBuf = await songBuffer(jam);
     const pcm = new Float32Array(await take.pcm.arrayBuffer());
