@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const M = window.Music, A = window.Analysis;
-  const APP_VERSION = '2026.11.14-slow';
+  const APP_VERSION = '2026.11.15-cloud';
   // ---------- on-device diagnostics: a breadcrumb trail saved before each risky step, so a crash leaves a trace ----------
   const Diag = {
     K: 'jm.diag',
@@ -30,7 +30,7 @@
   // ---------- settings ----------
   const Settings = {
     get(k, d) { try { const v = localStorage.getItem('jm.' + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
-    set(k, v) { try { localStorage.setItem('jm.' + k, JSON.stringify(v)); } catch (e) { } }
+    set(k, v, quiet) { try { localStorage.setItem('jm.' + k, JSON.stringify(v)); } catch (e) { } if (!quiet && window.Cloud) Cloud.touch('state', k); }
   };
 
   // ---------- IndexedDB ----------
@@ -60,9 +60,16 @@
       });
     },
     req(store, mode, fn) { return this.open().then(db => new Promise((res, rej) => { const t = db.transaction(store, mode); const r = fn(t.objectStore(store)); t.oncomplete = () => res(r && r.result); t.onerror = () => rej(t.error); })); },
-    put(store, val, key) { return this.req(store, 'readwrite', s => key !== undefined ? s.put(val, key) : s.put(val)); },
+    // quiet = a write made by the cloud sync itself, which must not be sent back to the cloud
+    async put(store, val, key, quiet) {
+      if (store === 'jams' && !quiet) val.updatedAt = Date.now();
+      const r = await this.req(store, 'readwrite', s => key !== undefined ? s.put(val, key) : s.put(val));
+      if (!quiet && window.Cloud) Cloud.touch(store, store === 'jams' ? val.id : key, val);
+      return r;
+    },
     get(store, key) { return this.req(store, 'readonly', s => s.get(key)); },
-    del(store, key) { return this.req(store, 'readwrite', s => s.delete(key)); },
+    async del(store, key, quiet) { const r = await this.req(store, 'readwrite', s => s.delete(key)); if (!quiet && window.Cloud) Cloud.touch(store, key); return r; },
+    blobKeys() { return this.req('blobs', 'readonly', s => s.getAllKeys()); },
     all(store) { return this.req(store, 'readonly', s => s.getAll()); },
     takesFor(jamId) { return this.req('takes', 'readonly', s => s.index('jamId').getAll(jamId)); }
   };
@@ -139,7 +146,11 @@
     if (bufCache[jam.id]) return bufCache[jam.id];
     let ab;
     if (jam.demo && jam.audio) ab = await (await fetch(jam.audio)).arrayBuffer();
-    else { const blob = await DB.get('blobs', 'audio:' + jam.id); if (!blob) throw new Error('needAudio'); ab = await blob.arrayBuffer(); }
+    else {
+      let blob = await DB.get('blobs', 'audio:' + jam.id);
+      if (!blob && window.Cloud) blob = await Cloud.fetchBlob('audio:' + jam.id); // saved from another phone
+      if (!blob) throw new Error('needAudio'); ab = await blob.arrayBuffer();
+    }
     const buf = await new Promise((res, rej) => { const p = ac().decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej); });
     return keepBuf(jam.id, buf);
   }
@@ -350,6 +361,13 @@ registerProcessor('jm-rec',R);`;
     for (const t of await DB.takesFor(jam.id).catch(() => [])) await DB.del('takes', t.id);
     Lists.removeEverywhere(jam.id);
   }
+  // a jam deleted on another phone: remove it here without telling the cloud again
+  async function removeJamLocal(id) {
+    await DB.del('jams', id, true);
+    for (const k of await DB.blobKeys().catch(() => [])) if (String(k).split(':')[1] === id) await DB.del('blobs', k, true);
+    for (const t of await DB.takesFor(id).catch(() => [])) await DB.del('takes', t.id, true);
+    delete bufCache[id];
+  }
   async function renameJam(jam, name) {
     name = name.trim(); if (!name) return;
     if (jam.demo) { Settings.set('name.' + jam.id, name); jam.name = name; }
@@ -440,16 +458,79 @@ registerProcessor('jm-rec',R);`;
   function SettingsPage() {
     const lat = Settings.get('latencyMs', 0);
     $app.innerHTML = `<div class="wrap"><div class="top"><button class="iconbtn" id="back">→</button><h1>הגדרות</h1></div>
+    <div class="card" id="acct"></div>
     <div class="card"><div style="font-weight:700">תיקון השהיה (אוזניות)</div>
     <div class="hint">אם בדוחות כל הכניסות יוצאות מאוחרות באותה כמות, זו השהיה של האוזניות. עם אוזניות חוטיות בדרך כלל אין צורך. עם בלוטות׳ זה בערך 150 עד 250.</div>
     <div class="slider"><label class="ltr" id="lv">${lat} ms</label><input type="range" min="0" max="400" step="10" value="${lat}" id="lat"></div></div>
     <div class="card" id="myI" style="cursor:pointer"><div style="font-weight:700">הכלי שלי</div><div class="hint">${M.instrument(myInstrument()).e} ${esc(M.instrument(myInstrument()).name)} · לחץ לשינוי</div></div>
     ${Settings.get('hiddenDemos', []).length ? `<button class="btn" id="unhide">החזר את שירי הדוגמה לרשימה</button>` : ''}
-    <div class="card"><div style="font-weight:700">על האפליקציה</div><div class="hint">Jam Master, גרסה ${APP_VERSION}. אב-טיפוס. ההקלטות והג׳אמים נשמרים רק בטלפון הזה.</div></div></div>`;
+    <div class="card"><div style="font-weight:700">על האפליקציה</div><div class="hint">Jam Master, גרסה ${APP_VERSION}. אב-טיפוס. ההקלטות שלך נשמרות רק בטלפון הזה.</div></div></div>`;
+    accountCard();
+    if (window.Cloud) cleanup = Cloud.onChange(accountCard);
     document.getElementById('back').onclick = () => go('');
     document.getElementById('myI').onclick = () => go('#/welcome');
     const uh = document.getElementById('unhide'); if (uh) uh.onclick = () => { Settings.set('hiddenDemos', []); toast('הדוגמאות חזרו'); go(''); };
     const r = document.getElementById('lat'); r.oninput = () => { document.getElementById('lv').textContent = r.value + ' ms'; Settings.set('latencyMs', +r.value); };
+  }
+
+  // ---------- Account: optional sign-in, so jams follow you to any phone ----------
+  function accountCard() {
+    const el = document.getElementById('acct'); if (!el) return;
+    const i = window.Cloud ? Cloud.info() : { user: null };
+    if (!i.user && i.maybe) { el.innerHTML = `<div style="font-weight:700">☁️ שמירה בענן</div><div class="hint">בודק את החיבור…</div>`; return; }
+    if (!i.user) {
+      el.innerHTML = `<div style="font-weight:700">☁️ שמירה בענן</div>
+        <div class="hint">התחבר כדי שהג׳אמים, הרשימות והשירים יישמרו בענן ויחכו לך בכל טלפון. בלי התחברות הכל ממשיך לעבוד כרגיל, רק בטלפון הזה.</div>
+        <button class="btn primary" id="login" style="margin-top:10px">התחבר עם המייל</button>`;
+      document.getElementById('login').onclick = () => loginSheet();
+      return;
+    }
+    const st = i.syncing ? 'מסנכרן…' : i.error ? 'לא הצלחתי לסנכרן עכשיו (אולי אין אינטרנט). אנסה שוב אוטומטית.' : i.last ? 'סונכרן לאחרונה: ' + new Date(i.last).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' }) : 'עוד לא סונכרן';
+    el.innerHTML = `<div style="font-weight:700">☁️ מחובר</div>
+      <div class="hint"><span class="ltr">${esc(i.user.email)}</span><br>${esc(st)}</div>
+      <div style="display:flex;gap:8px;margin-top:10px"><button class="btn" id="syncNow" style="margin:0" ${i.syncing ? 'disabled' : ''}>🔄 סנכרן עכשיו</button><button class="btn ghost" id="logout" style="margin:0;width:auto">התנתק</button></div>`;
+    document.getElementById('syncNow').onclick = () => Cloud.sync();
+    document.getElementById('logout').onclick = () => sheet(`<h3>להתנתק?</h3><div class="sub">הג׳אמים יישארו בטלפון הזה וגם בענן. שינויים חדשים בטלפון הזה לא יישמרו בענן עד שתתחבר שוב.</div><button class="btn rec" data-act="yes">התנתק</button><button class="btn ghost" data-close>ביטול</button>`, async a => { if (a === 'yes') { await Cloud.signOut(); toast('התנתקת'); accountCard(); } });
+  }
+  function loginSheet() {
+    const el = document.createElement('div'); el.className = 'sheet'; document.body.appendChild(el);
+    const close = () => el.remove();
+    el.addEventListener('click', e => { if (e.target === el || e.target.closest('[data-close]')) close(); });
+    let email = Settings.get('lastEmail', '') || '';
+    const err = m => { const x = el.querySelector('.lerr'); if (x) { x.textContent = m; x.style.display = m ? '' : 'none'; } };
+    const errBox = '<div class="errbox lerr" style="display:none;margin-top:10px"></div>';
+    function askEmail() {
+      el.innerHTML = `<div><h3>התחברות</h3><div class="sub">נשלח לך למייל קוד כניסה. אין צורך בסיסמה.</div>
+        <input class="field ltr" id="em" type="email" inputmode="email" autocomplete="email" placeholder="name@gmail.com" value="${esc(email)}">
+        ${errBox}<button class="btn primary" id="send" style="margin-top:12px">שלח לי קוד</button><button class="btn ghost" data-close>ביטול</button></div>`;
+      const em = el.querySelector('#em'), send = el.querySelector('#send');
+      em.onkeydown = e => { if (e.key === 'Enter') send.click(); };
+      send.onclick = async () => {
+        email = em.value.trim().toLowerCase();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { err('נראה שכתובת המייל לא שלמה'); return; }
+        send.disabled = true; send.textContent = 'שולח…'; err('');
+        try { await Cloud.sendCode(email); Settings.set('lastEmail', email, true); askCode(); }
+        catch (e) { send.disabled = false; send.textContent = 'שלח לי קוד'; err(/rate|security purposes/i.test(e.message || '') ? 'שלחנו כבר קוד לפני רגע. חכה דקה ונסה שוב.' : navigator.onLine ? 'לא הצלחתי לשלוח את הקוד: ' + (e.message || e) : 'אין חיבור לאינטרנט כרגע'); }
+      };
+      setTimeout(() => em.focus(), 50);
+    }
+    function askCode() {
+      el.innerHTML = `<div><h3>מה הקוד?</h3><div class="sub">שלחנו קוד לכתובת <span class="ltr">${esc(email)}</span>. אם הוא לא מגיע תוך דקה, בדוק גם בספאם.</div>
+        <input class="field ltr" id="cd" inputmode="numeric" autocomplete="one-time-code" maxlength="10" placeholder="123456" style="text-align:center;font-size:24px;letter-spacing:6px">
+        ${errBox}<button class="btn primary" id="ok" style="margin-top:12px">כניסה</button><button class="btn ghost" id="back2">מייל אחר / שלח שוב</button></div>`;
+      const cd = el.querySelector('#cd'), ok = el.querySelector('#ok');
+      el.querySelector('#back2').onclick = askEmail;
+      cd.onkeydown = e => { if (e.key === 'Enter') ok.click(); };
+      ok.onclick = async () => {
+        const code = cd.value.replace(/\D/g, '');
+        if (code.length < 6) { err('הקוד צריך להיות 6 ספרות או יותר'); return; }
+        ok.disabled = true; ok.textContent = 'בודק…'; err('');
+        try { await Cloud.verifyCode(email, code); close(); toast('מחובר! מעלה את הג׳אמים לענן…', 3500); accountCard(); }
+        catch (e) { ok.disabled = false; ok.textContent = 'כניסה'; err(/expired|invalid/i.test(e.message || '') ? 'הקוד לא נכון או שפג תוקפו. נסה שוב או בקש קוד חדש.' : 'לא הצלחתי להתחבר: ' + (e.message || e)); }
+      };
+      setTimeout(() => cd.focus(), 50);
+    }
+    askEmail();
   }
 
   // ---------- Jam page (listen / record / practice) ----------
@@ -1277,5 +1358,6 @@ registerProcessor('jm-rec',R);`;
       document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => { }); });
     }).catch(() => { });
   }
+  if (window.Cloud) Cloud.init({ DB, Settings, removeJamLocal, refresh() { const h = IN_FRAME ? curRoute : location.hash; if (!h || h === '#/' || h === '#') route(); } });
   route();
 })();
