@@ -224,3 +224,4 @@ input[type=range]{flex:1;accent-color:var(--accent);height:30px}
 .trk.sel{background:#ffb54722;color:var(--accent);box-shadow:inset 0 0 0 2px var(--accent)}
 .bandcard .keys{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:6px;direction:ltr}
 .stylechips .trk{text-decoration:none;color:var(--text)}
+.btn.gbtn{background:#fff;color:#1f1f1f;display:flex;align-items:center;justify-content:center;gap:10px;font-weight:700}
