@@ -464,7 +464,7 @@ registerProcessor('jm-rec',R);`;
     <div class="slider"><label class="ltr" id="lv">${lat} ms</label><input type="range" min="0" max="400" step="10" value="${lat}" id="lat"></div></div>
     <div class="card" id="myI" style="cursor:pointer"><div style="font-weight:700">הכלי שלי</div><div class="hint">${M.instrument(myInstrument()).e} ${esc(M.instrument(myInstrument()).name)} · לחץ לשינוי</div></div>
     ${Settings.get('hiddenDemos', []).length ? `<button class="btn" id="unhide">החזר את שירי הדוגמה לרשימה</button>` : ''}
-    <div class="card"><div style="font-weight:700">על האפליקציה</div><div class="hint">Jam Master, גרסה ${APP_VERSION}. אב-טיפוס. ההקלטות שלך נשמרות רק בטלפון הזה.</div></div></div>`;
+    <div class="card"><div style="font-weight:700">על האפליקציה</div><div class="hint">Jam Master, גרסה ${APP_VERSION}. אב-טיפוס. ההקלטות שלך נשמרות רק בטלפון הזה. <a href="privacy.html" style="color:inherit">מדיניות פרטיות</a></div></div></div>`;
     accountCard();
     if (window.Cloud) cleanup = Cloud.onChange(accountCard);
     document.getElementById('back').onclick = () => go('');
