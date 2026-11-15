@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const M = window.Music, A = window.Analysis;
-  const APP_VERSION = '2026.11.15-google';
+  const APP_VERSION = '2026.11.15-share';
   // ---------- on-device diagnostics: a breadcrumb trail saved before each risky step, so a crash leaves a trace ----------
   const Diag = {
     K: 'jm.diag',
@@ -242,13 +242,14 @@ registerProcessor('jm-rec',R);`;
     const [page, id] = h.split('/');
     window.scrollTo(0, 0);
     try {
-      if (!Settings.get('myInstrument', null) && page !== 'welcome') { Welcome(); return; }
+      if (!Settings.get('myInstrument', null) && page !== 'welcome') { if (page === 'join') Settings.set('pendingJoin', id, true); Welcome(); return; }
       if (page === 'welcome') Welcome();
       else if (page === 'jam') await JamPage(decodeURIComponent(id));
       else if (page === 'new') await NewJam();
       else if (page === 'sync') await SyncPage(decodeURIComponent(id));
       else if (page === 'take') await TakePage(decodeURIComponent(id));
       else if (page === 'settings') SettingsPage();
+      else if (page === 'join') await JoinPage(decodeURIComponent(id || ''));
       else await Home();
     } catch (e) { console.error(e); $app.innerHTML = `<div class="wrap"><div class="errbox">משהו השתבש: ${esc(e.message || e)}</div><button class="btn" id="eb">חזרה</button></div>`; }
   }
@@ -269,7 +270,7 @@ registerProcessor('jm-rec',R);`;
     const back = document.getElementById('back'); if (back) back.onclick = () => go('');
     const goBtn = document.getElementById('go');
     $app.querySelectorAll('.choice').forEach(b => b.onclick = () => { sel = b.dataset.i; $app.querySelectorAll('.choice').forEach(x => x.classList.toggle('on', x === b)); goBtn.disabled = false; });
-    goBtn.onclick = () => { Settings.set('myInstrument', sel); go(''); };
+    goBtn.onclick = () => { Settings.set('myInstrument', sel); const pj = Settings.get('pendingJoin', null); Settings.set('pendingJoin', null, true); go(pj ? '#/join/' + pj : ''); };
   }
 
   // ---------- Jam lists (each list holds jam ids; a jam can be in several lists) ----------
@@ -897,11 +898,13 @@ registerProcessor('jm-rec',R);`;
     sheet(`<h3>${esc(jam.name)}</h3>
       ${hasScore(jam) && !jam.gen ? `<button class="btn" data-act="sync">🎚️ סנכרון השיר לתווים</button>` : ''}
       ${!jam.demo ? `<button class="btn" data-act="xml">📄 ${hasScore(jam) ? 'החלף' : 'הוסף'} תווים (PDF)</button>` : ''}
+      ${!jam.demo ? `<button class="btn" data-act="share">👥 שתף עם ההרכב</button>` : ''}
       <button class="btn" data-act="ren">✏️ שנה שם</button>
       <button class="btn" data-act="lists">📋 הוסף לרשימה</button>
       <button class="btn ghost" data-act="del" style="color:var(--bad)">מחק את הג׳אם</button>
       <button class="btn ghost" data-close>סגור</button>`, async act => {
       if (act === 'sync') go('#/sync/' + encodeURIComponent(jam.id));
+      if (act === 'share') shareJam(jam);
       if (act === 'del') askDelete(jam, () => go(''));
       if (act === 'ren') askRename(jam, () => route());
       if (act === 'lists') askLists(jam);
@@ -911,6 +914,90 @@ registerProcessor('jm-rec',R);`;
         catch (e) { toast(e.message === 'noNotes' ? 'לא מצאתי תווים בקובץ. אם זו סריקה או צילום, עדיין אין לי איך לקרוא אותו.' : 'לא הצלחתי לקרוא את הקובץ', 4000); }
       });
     });
+  }
+
+  // ---------- Sharing with the band ----------
+  function shareJam(jam) {
+    const i = window.Cloud ? Cloud.info() : { user: null };
+    if (!i.user) {
+      sheet(`<h3>👥 שיתוף עם ההרכב</h3><div class="sub">כדי לשתף, השיר צריך להיות שמור בענן. התחבר פעם אחת (עם Google או מייל) ואז תוכל לשלוח קישור לחברי ההרכב.</div><button class="btn primary" data-act="in">התחבר</button><button class="btn ghost" data-close>ביטול</button>`, a => { if (a === 'in') loginSheet(); });
+      return;
+    }
+    const el = document.createElement('div'); el.className = 'sheet'; document.body.appendChild(el);
+    el.addEventListener('click', e => { if (e.target === el || e.target.closest('[data-close]')) el.remove(); });
+    el.innerHTML = `<div><h3>👥 שיתוף "${esc(jam.name)}"</h3><div style="text-align:center;padding:14px"><div class="spinner"></div><div class="hint">מכין קישור… (בפעם הראשונה השיר עולה לענן, זה יכול לקחת חצי דקה)</div></div></div>`;
+    Cloud.share(jam).then(url => {
+      const text = `בוא נתאמן על "${jam.name}" ב-Jam Master 🎷\n${url}`;
+      el.innerHTML = `<div><h3>👥 הקישור מוכן</h3><div class="sub">שלח אותו לחברי ההרכב. מי שפותח אותו מקבל את השיר והתווים לטלפון שלו, ויכול להוסיף את התווים של הכלי שלו.</div>
+        <input class="field ltr" readonly value="${esc(url)}" style="font-size:13px">
+        <button class="btn primary" id="shWa" style="margin-top:12px">שלח בוואטסאפ</button>
+        ${navigator.share ? '<button class="btn" id="shSys">שתף בדרך אחרת</button>' : ''}
+        <button class="btn" id="shCopy">📋 העתק קישור</button><button class="btn ghost" data-close>סגור</button></div>`;
+      el.querySelector('#shWa').onclick = () => { window.open('https://wa.me/?text=' + encodeURIComponent(text), '_blank'); };
+      const sys = el.querySelector('#shSys'); if (sys) sys.onclick = () => navigator.share({ title: jam.name, text: `בוא נתאמן על "${jam.name}" ב-Jam Master 🎷`, url }).catch(() => { });
+      el.querySelector('#shCopy').onclick = async () => { try { await navigator.clipboard.writeText(url); toast('הקישור הועתק'); } catch (e) { el.querySelector('input').select(); } };
+    }).catch(e => {
+      const m = e.message === 'noAudio' ? 'השיר עצמו לא נמצא בטלפון הזה, אז אין מה לשתף. פתח את הג׳אם פעם אחת כדי שהשיר ייטען, ונסה שוב.' : !navigator.onLine ? 'אין חיבור לאינטרנט כרגע.' : 'לא הצלחתי ליצור קישור: ' + (e.message || e);
+      el.innerHTML = `<div><h3>👥 שיתוף</h3><div class="errbox">${esc(m)}</div><button class="btn ghost" data-close>סגור</button></div>`;
+    });
+  }
+
+  async function JoinPage(code) {
+    $app.innerHTML = `<div class="wrap"><div class="top"><button class="iconbtn" id="back">→</button><h1>ג׳אם ששיתפו איתך</h1></div><div class="spinner"></div><div class="hint" style="text-align:center">טוען…</div></div>`;
+    document.getElementById('back').onclick = () => go('');
+    const done = Settings.get('joined.' + code, null);
+    if (done && await DB.get('jams', done).catch(() => null)) { go('#/jam/' + encodeURIComponent(done)); return; }
+    let sh = null;
+    try { sh = window.Cloud && code ? await Cloud.getShare(code) : null; } catch (e) { console.warn(e); }
+    const wrap = $app.querySelector('.wrap');
+    if (!sh || !sh.jam) {
+      wrap.innerHTML = `<div class="top"><button class="iconbtn" id="back">→</button><h1>ג׳אם ששיתפו איתך</h1></div><div class="errbox">${navigator.onLine ? 'לא מצאתי את הג׳אם הזה. אולי הקישור לא שלם, או שהוא כבר לא בתוקף. בקש מחבר ההרכב לשלוח אותו שוב.' : 'צריך חיבור לאינטרנט כדי לקבל את הג׳אם.'}</div><button class="btn" id="home">לג׳אמים שלי</button>`;
+      document.getElementById('back').onclick = document.getElementById('home').onclick = () => go('');
+      return;
+    }
+    const sj = sh.jam, theirs = M.instrument(sj.instrument);
+    let sel = myInstrument(), myScore = null, myScoreName = '';
+    function render() {
+      const same = sel === sj.instrument;
+      wrap.innerHTML = `<div class="top"><button class="iconbtn" id="back">→</button><h1>ג׳אם ששיתפו איתך</h1></div>
+        <div class="card jam"><div class="art">${theirs.e}</div><div style="flex:1;min-width:0"><div class="t">${esc(sj.name)}</div><div class="meta">${esc(sh.from || 'חבר בהרכב')} שיתף איתך${sj.gen ? ' · הרכב וירטואלי' : ' · שיר'}${sj.score && sj.score.notes ? ' + תווים ל' + esc(theirs.name) : ''}</div></div></div>
+        <h2>על מה אתה מנגן בשיר הזה?</h2>
+        ${instrumentGrid(sel)}
+        ${sj.score && !same ? `<div class="card"><div style="font-weight:700">📄 התווים של הכלי שלך</div>
+          <div class="hint">${myScore ? '✓ ' + esc(myScoreName) + ` (${myScore.notes.length} תווים)` : `התווים ששותפו כתובים ל${esc(theirs.name)}. יש לך את התווים של ה${esc(M.instrument(sel).name)}? אפשר להוסיף אותם עכשיו או אחר כך מהתפריט של הג׳אם. בלי זה אציג לך את התווים ששותפו, בטונליות של הכלי שלך.`}</div>
+          <button class="btn" id="mySheet" style="margin-top:8px">${myScore ? 'החלף קובץ' : 'הוסף את התווים שלי (PDF)'}</button></div>` : ''}
+        <button class="btn primary" id="add">＋ הוסף לג׳אמים שלי</button>`;
+      document.getElementById('back').onclick = () => go('');
+      wrap.querySelectorAll('.choice').forEach(b => b.onclick = () => { sel = b.dataset.i; myScore = null; render(); });
+      const ms = document.getElementById('mySheet');
+      if (ms) ms.onclick = () => pickFile('application/pdf,.pdf,.musicxml,.xml,.mxl', async f => {
+        toast('קורא את התווים…', 1500);
+        try { myScore = await readScoreFile(f, sel); myScoreName = f.name; render(); }
+        catch (e) { toast(e.message === 'noNotes' ? 'לא מצאתי תווים בקובץ. אם זו סריקה או צילום, עדיין אין לי איך לקרוא אותו.' : 'לא הצלחתי לקרוא את הקובץ', 4000); }
+      });
+      document.getElementById('add').onclick = add;
+    }
+    async function add() {
+      const btn = document.getElementById('add'); btn.disabled = true; btn.textContent = 'מוריד את השיר…';
+      try {
+        const id = 'j' + Date.now();
+        const jam = { ...JSON.parse(JSON.stringify(sj)), id, instrument: sel, created: Date.now(), sharedBy: sh.from || null };
+        if (myScore) {
+          const keep = jam.sync && jam.score && myScore.totalBeats === jam.score.totalBeats && Math.round(myScore.meter) === Math.round(jam.score.meter);
+          jam.score = myScore; if (!keep) jam.sync = null;
+        }
+        for (const f of sh.files || []) {
+          const r = await fetch(f.url); if (!r.ok) throw new Error('download ' + r.status);
+          await DB.put('blobs', await r.blob(), f.kind + ':' + id);
+        }
+        await DB.put('jams', jam);
+        Lists.init([]); Lists.add(Lists.cur().id, id);
+        Settings.set('joined.' + code, id, true);
+        toast('הג׳אם נוסף! 🎉');
+        go(hasScore(jam) && !hasSync(jam) && !jam.gen ? '#/sync/' + encodeURIComponent(id) : '#/jam/' + encodeURIComponent(id));
+      } catch (e) { console.error(e); btn.disabled = false; btn.textContent = 'נסה שוב'; toast(navigator.onLine ? 'ההורדה נתקעה, נסה שוב' : 'אין חיבור לאינטרנט', 4000); }
+    }
+    render();
   }
 
   // ---------- generic bottom sheet ----------

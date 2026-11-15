@@ -169,6 +169,45 @@
     } catch (e) { return null; }
   }
 
+  // ---------- sharing a jam with the band: a link anyone can open, no account needed to receive ----------
+  const YEAR = 365 * 24 * 3600;
+  async function share(jam) {
+    await client(); if (!user) throw new Error('signin');
+    // make sure this jam's files are in the cloud before handing out links to them
+    const keys = (await app.DB.blobKeys().catch(() => [])).filter(k => k.split(':')[1] === jam.id && !/:pdf$/.test(k) && /^audio:/.test(k));
+    const { data: list } = await sb.storage.from(BUCKET).list(user.id, { limit: 1000 });
+    const have = new Set((list || []).map(f => user.id + '/' + f.name));
+    const code = Array.from(crypto.getRandomValues(new Uint8Array(9)), b => 'abcdefghijkmnpqrstuvwxyz23456789'[b % 32]).join('');
+    const files = [];
+    for (const k of keys) {
+      if (!have.has(pathOf(k))) {
+        const b = await app.DB.get('blobs', k); if (!b) continue;
+        const { error } = await sb.storage.from(BUCKET).upload(pathOf(k), b, { upsert: true, contentType: b.type || 'application/octet-stream' });
+        if (error) throw error;
+      }
+      // the band gets its own copy, so the link keeps working even if this jam is later deleted
+      const kind = k.split(':')[0], dst = user.id + '/share_' + code + '_' + kind;
+      const { error: ce } = await sb.storage.from(BUCKET).copy(pathOf(k), dst);
+      if (ce) throw ce;
+      const { data, error } = await sb.storage.from(BUCKET).createSignedUrl(dst, YEAR);
+      if (error) throw error;
+      files.push({ kind, url: data.signedUrl });
+    }
+    if (!jam.gen && !files.some(f => f.kind === 'audio')) throw new Error('noAudio');
+    const md = user.user_metadata || {};
+    const from = md.full_name || md.name || (user.email || '').split('@')[0];
+    const { id, updatedAt, created, ...rest } = jam;
+    const { error } = await sb.from('shares').insert({ code, data: { v: 1, from, jam: rest, files } });
+    if (error) throw error;
+    return location.origin + location.pathname + '#/join/' + code;
+  }
+  async function getShare(code) {
+    await client();
+    const { data, error } = await sb.rpc('get_share', { c: code });
+    if (error) throw error;
+    return data;
+  }
+
   window.Cloud = {
     init(a) {
       app = a;
@@ -189,7 +228,7 @@
       window.addEventListener('online', () => soon(500));
       document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && user) soon(800); });
     },
-    touch, sync, fetchBlob,
+    touch, sync, fetchBlob, share, getShare,
     onChange(f) { subs.push(f); return () => { const i = subs.indexOf(f); if (i >= 0) subs.splice(i, 1); }; },
     info() { return { user: user ? { email: user.email } : null, maybe: hasToken() && !loadFailed, syncing, last: L.get('last', 0), error: lastErr, pending: (() => { const d = dirty(); return Object.keys(d.jams).length + Object.keys(d.blobs).length + (d.state ? 1 : 0); })() }; },
     async sendLink(email) {
