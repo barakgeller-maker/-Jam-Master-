@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const M = window.Music, A = window.Analysis;
-  const APP_VERSION = '2026.11.15-takes';
+  const APP_VERSION = '2026.11.17-sync';
   // ---------- on-device diagnostics: a breadcrumb trail saved before each risky step, so a crash leaves a trace ----------
   const Diag = {
     K: 'jm.diag',
@@ -486,7 +486,7 @@ registerProcessor('jm-rec',R);`;
       document.getElementById('login').onclick = () => loginSheet();
       return;
     }
-    const st = i.syncing ? 'מסנכרן…' : i.error ? 'לא הצלחתי לסנכרן עכשיו (אולי אין אינטרנט). אנסה שוב אוטומטית.' : i.last ? 'סונכרן לאחרונה: ' + new Date(i.last).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' }) : 'עוד לא סונכרן';
+    const st = i.syncing ? 'מסנכרן…' : i.error ? 'לא הצלחתי לסנכרן עכשיו. אנסה שוב אוטומטית. (' + i.error.slice(0, 120) + ')' : i.last ? 'סונכרן לאחרונה: ' + new Date(i.last).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' }) : 'עוד לא סונכרן';
     el.innerHTML = `<div style="font-weight:700">☁️ מחובר</div>
       <div class="hint"><span class="ltr">${esc(i.user.email)}</span><br>${esc(st)}</div>
       <div style="display:flex;gap:8px;margin-top:10px"><button class="btn" id="syncNow" style="margin:0" ${i.syncing ? 'disabled' : ''}>🔄 סנכרן עכשיו</button><button class="btn ghost" id="logout" style="margin:0;width:auto">התנתק</button></div>`;
