@@ -81,6 +81,19 @@
     }
   }
   const jamOfBlob = key => key.split(':')[1];
+  // Postgres refuses the \u0000 character inside JSON (it can come from text read out of a PDF)
+  const clean = v => JSON.parse(JSON.stringify(v).replace(/\\u0000/g, ''));
+  // the newest change in the cloud, a tiny request used to notice changes made on another device
+  async function latest() {
+    const { data, error } = await sb.from('items').select('updated_at').order('updated_at', { ascending: false }).limit(1);
+    if (error) throw error;
+    return data && data[0] ? data[0].updated_at : null;
+  }
+  // while the app is open, look every 15 seconds whether another device changed something
+  async function poll() {
+    if (!user || syncing || !navigator.onLine || document.visibilityState !== 'visible') return;
+    try { const t = await latest(); if (t !== L.get('seen', null)) sync(); } catch (e) { }
+  }
 
   function stateNow() {
     const v = {};
@@ -102,7 +115,7 @@
     if (!user || !navigator.onLine) return;
     if (syncing) { again = true; return; }
     syncing = true; lastErr = null; emit();
-    let changed = false;
+    let changed = false, fileErr = null; const failed = new Set();
     try {
       const uid = user.id, firstKey = 'synced.' + uid, first = !L.get(firstKey, false);
       const rows = []; // the server hands rows out 1000 at a time
@@ -169,6 +182,7 @@
         const { pcm, ...meta } = t; up.push({ user_id: uid, kind: 'take', id: t.id, data: meta, deleted: false, updated_at: now });
       }
       if (pushState) { const t = L.get('stateT', 0) || Date.now(); L.set('stateT', t); up.push({ user_id: uid, kind: 'state', id: 'main', data: { t, v: stateNow() }, deleted: false, updated_at: now }); }
+      up.forEach(r => { r.data = clean(r.data); });
       for (let i = 0; i < up.length; i += 20) { const { error: e2 } = await sb.from('items').upsert(up.slice(i, i + 20)); if (e2) throw e2; }
 
       // files: upload what the cloud doesn't have yet, remove files of deleted jams
@@ -180,12 +194,12 @@
         if (gone.has(jamOfBlob(k)) || have.has(pathOf(k))) continue;
         const b = await app.DB.get('blobs', k); if (!b) continue;
         const { error: e4 } = await sb.storage.from(BUCKET).upload(pathOf(k), b, { upsert: true, contentType: b.type || 'application/octet-stream' });
-        if (e4) throw e4;
+        if (e4) { fileErr = fileErr || e4; failed.add('b:' + k); }
       }
       for (const t of pushTakes) {
         if (t._del || !t.pcm || t.audioGone || have.has(takePath(t.id))) continue;
         const { error: e5 } = await sb.storage.from(BUCKET).upload(takePath(t.id), await packTake(t), { upsert: true, contentType: 'application/octet-stream' });
-        if (e5) throw e5;
+        if (e5) { fileErr = fileErr || e5; failed.add('t:' + t.id); }
       }
       const delPaths = new Set(Object.keys(d.blobs).filter(k => d.blobs[k] === 'del').map(pathOf));
       pushTakes.forEach(t => { if (t._del || t.audioGone) delPaths.add(takePath(t.id)); });
@@ -197,11 +211,13 @@
       markDirty(cur => {
         for (const id in d.jams) if (cur.jams[id] === d.jams[id]) delete cur.jams[id];
         for (const k in d.blobs) if (cur.blobs[k] === d.blobs[k]) delete cur.blobs[k];
-        for (const k in d.takes) if (cur.takes[k] === d.takes[k]) delete cur.takes[k];
+        for (const k in d.takes) if (cur.takes[k] === d.takes[k] && !failed.has('t:' + k)) delete cur.takes[k];
         if (d.state && L.get('stateT', 0) === stateT0) cur.state = false;
       });
       L.set(firstKey, true); L.set('last', Date.now());
-    } catch (e) { console.warn('cloud sync', e); lastErr = String(e && e.message || e); }
+      L.set('seen', await latest().catch(() => null));
+      if (fileErr) throw fileErr;
+    } catch (e) { console.warn('cloud sync', e); lastErr = String(e && (e.message || e.error) || e); }
     syncing = false; emit();
     if (changed && app.refresh) app.refresh();
     if (again) { again = false; soon(500); }
@@ -292,6 +308,8 @@
       }).catch(() => { loadFailed = true; emit(); });
       window.addEventListener('online', () => soon(500));
       document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && user) soon(800); });
+      window.addEventListener('focus', () => { if (user) soon(800); });
+      setInterval(poll, 15000);
     },
     touch, sync, fetchBlob, fetchTakeAudio, share, getShare,
     onChange(f) { subs.push(f); return () => { const i = subs.indexOf(f); if (i >= 0) subs.splice(i, 1); }; },
